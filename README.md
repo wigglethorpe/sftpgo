@@ -2,7 +2,7 @@
 
 [![CI Status](https://github.com/drakkan/sftpgo/workflows/CI/badge.svg?branch=main&event=push)](https://github.com/drakkan/sftpgo/workflows/CI/badge.svg?branch=main&event=push)
 [![Code Coverage](https://codecov.io/gh/drakkan/sftpgo/branch/main/graph/badge.svg)](https://codecov.io/gh/drakkan/sftpgo/branch/main)
-[![License: AGPL v3](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
+[![License: AGPL-3.0-only](https://img.shields.io/badge/License-AGPLv3-blue.svg)](https://www.gnu.org/licenses/agpl-3.0)
 [![Docker Pulls](https://img.shields.io/docker/pulls/drakkan/sftpgo)](https://hub.docker.com/r/drakkan/sftpgo)
 [![Mentioned in Awesome Go](https://awesome.re/mentioned-badge.svg)](https://github.com/avelino/awesome-go)
 
@@ -10,6 +10,25 @@
 
 Fully featured and highly configurable SFTP server with optional HTTP/S, FTP/S and WebDAV support.
 Several storage backends are supported: local filesystem, encrypted local filesystem, S3 (compatible) Object Storage, Google Cloud Storage, Azure Blob Storage, SFTP.
+
+## Sponsors
+
+If you find SFTPGo useful please consider supporting this Open Source project.
+
+Maintaining and evolving SFTPGo is a lot of work - easily the equivalent of a full time job - for me.
+
+I'd like to make SFTPGo into a sustainable long term project and would not like to introduce a dual licensing option and limit some features to the proprietary version only.
+
+If you use SFTPGo, it is in your best interest to ensure that the project you rely on stays healthy and well maintained.
+This can only happen with your donations and [sponsorships](https://github.com/sponsors/drakkan) :heart:
+
+If you just take and don't return anything back, the project will die in the long run and you will be forced to pay for a similar proprietary solution.
+
+More [info](https://github.com/drakkan/sftpgo/issues/452).
+
+Thank you to our sponsors!
+
+[<img src="https://www.7digital.com/wp-content/themes/sevendigital/images/top_logo.png" alt="7digital logo">](https://www.7digital.com/)
 
 ## Features
 
@@ -21,6 +40,7 @@ Several storage backends are supported: local filesystem, encrypted local filesy
 - Chroot isolation for local accounts. Cloud-based accounts can be restricted to a certain base path.
 - Per-user and per-directory virtual permissions, for each exposed path you can allow or deny: directory listing, upload, overwrite, download, delete, rename, create directories, create symlinks, change owner/group/file mode and modification time.
 - [REST API](./docs/rest-api.md) for users and folders management, data retention, backup, restore and real time reports of the active connections with possibility of forcibly closing a connection.
+- The [Event Manager](./docs/eventmanager.md) allows to define custom workflows based on server events or schedules.
 - [Web based administration interface](./docs/web-admin.md) to easily manage users, folders and connections.
 - [Web client interface](./docs/web-client.md) so that end users can change their credentials, manage and share their files in the browser.
 - Public key and password authentication. Multiple public keys per-user are supported.
@@ -95,7 +115,13 @@ An official Docker image is available. Documentation is [here](./docker/README.m
 
 APT and YUM repositories are [available](./docs/repo.md).
 
-SFTPGo is also available on [AWS Marketplace](https://aws.amazon.com/marketplace/seller-profile?id=6e849ab8-70a6-47de-9a43-13c3fa849335) and [Azure Marketplace](https://azuremarketplace.microsoft.com/en-us/marketplace/apps/prasselsrl1645470739547.sftpgo_linux), purchasing from there will help keep SFTPGo a long-term sustainable project.
+SFTPGo is also available on some marketplaces:
+
+- [AWS Marketplace](https://aws.amazon.com/marketplace/seller-profile?id=6e849ab8-70a6-47de-9a43-13c3fa849335)
+- [Azure Marketplace](https://azuremarketplace.microsoft.com/en-us/marketplace/apps/prasselsrl1645470739547.sftpgo_linux)
+- [Elest.io](https://elest.io/open-source/sftpgo)
+
+Purchasing from there will help keep SFTPGo a long-term sustainable project.
 
 <details><summary>Windows packages</summary>
 
@@ -314,14 +340,6 @@ We are very grateful to all the people who contributed with ideas and/or pull re
 
 Thank you [ysura](https://www.ysura.com/) for granting me stable access to a test AWS S3 account.
 
-## Sponsors
-
-I'd like to make SFTPGo into a sustainable long term project and your [sponsorship](https://github.com/sponsors/drakkan) will really help :heart:
-
-Thank you to our sponsors!
-
-[<img src="https://www.7digital.com/wp-content/themes/sevendigital/images/top_logo.png" alt="7digital logo">](https://www.7digital.com/)
-
 ## License
 
-GNU AGPLv3
+GNU AGPL-3.0-only
