@@ -35,7 +35,7 @@ import (
 )
 
 const (
-	boltDatabaseVersion = 20
+	boltDatabaseVersion = 22
 )
 
 var (
@@ -372,6 +372,10 @@ func (p *BoltProvider) addAdmin(admin *Admin) error {
 		if err != nil {
 			return err
 		}
+		groupBucket, err := p.getGroupsBucket(tx)
+		if err != nil {
+			return err
+		}
 		if a := bucket.Get([]byte(admin.Username)); a != nil {
 			return fmt.Errorf("admin %v already exists", admin.Username)
 		}
@@ -383,6 +387,12 @@ func (p *BoltProvider) addAdmin(admin *Admin) error {
 		admin.LastLogin = 0
 		admin.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		admin.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
+		for idx := range admin.Groups {
+			err = p.addAdminToGroupMapping(admin.Username, admin.Groups[idx].Name, groupBucket)
+			if err != nil {
+				return err
+			}
+		}
 		buf, err := json.Marshal(admin)
 		if err != nil {
 			return err
@@ -401,8 +411,11 @@ func (p *BoltProvider) updateAdmin(admin *Admin) error {
 		if err != nil {
 			return err
 		}
+		groupBucket, err := p.getGroupsBucket(tx)
+		if err != nil {
+			return err
+		}
 		var a []byte
-
 		if a = bucket.Get([]byte(admin.Username)); a == nil {
 			return util.NewRecordNotFoundError(fmt.Sprintf("admin %v does not exist", admin.Username))
 		}
@@ -412,6 +425,18 @@ func (p *BoltProvider) updateAdmin(admin *Admin) error {
 			return err
 		}
 
+		for idx := range oldAdmin.Groups {
+			err = p.removeAdminFromGroupMapping(oldAdmin.Username, oldAdmin.Groups[idx].Name, groupBucket)
+			if err != nil {
+				return err
+			}
+		}
+		for idx := range admin.Groups {
+			err = p.addAdminToGroupMapping(admin.Username, admin.Groups[idx].Name, groupBucket)
+			if err != nil {
+				return err
+			}
+		}
 		admin.ID = oldAdmin.ID
 		admin.CreatedAt = oldAdmin.CreatedAt
 		admin.LastLogin = oldAdmin.LastLogin
@@ -431,8 +456,26 @@ func (p *BoltProvider) deleteAdmin(admin Admin) error {
 			return err
 		}
 
-		if bucket.Get([]byte(admin.Username)) == nil {
+		var a []byte
+		if a = bucket.Get([]byte(admin.Username)); a == nil {
 			return util.NewRecordNotFoundError(fmt.Sprintf("admin %v does not exist", admin.Username))
+		}
+		var oldAdmin Admin
+		err = json.Unmarshal(a, &oldAdmin)
+		if err != nil {
+			return err
+		}
+		if len(oldAdmin.Groups) > 0 {
+			groupBucket, err := p.getGroupsBucket(tx)
+			if err != nil {
+				return err
+			}
+			for idx := range oldAdmin.Groups {
+				err = p.removeAdminFromGroupMapping(oldAdmin.Username, oldAdmin.Groups[idx].Name, groupBucket)
+				if err != nil {
+					return err
+				}
+			}
 		}
 
 		if err := p.deleteRelatedAPIKey(tx, admin.Username, APIKeyScopeAdmin); err != nil {
@@ -570,6 +613,8 @@ func (p *BoltProvider) addUser(user *User) error {
 		user.UsedUploadDataTransfer = 0
 		user.UsedDownloadDataTransfer = 0
 		user.LastLogin = 0
+		user.FirstDownload = 0
+		user.FirstUpload = 0
 		user.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		user.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		for idx := range user.VirtualFolders {
@@ -621,6 +666,8 @@ func (p *BoltProvider) updateUser(user *User) error {
 		user.UsedUploadDataTransfer = oldUser.UsedUploadDataTransfer
 		user.UsedDownloadDataTransfer = oldUser.UsedDownloadDataTransfer
 		user.LastLogin = oldUser.LastLogin
+		user.FirstDownload = oldUser.FirstDownload
+		user.FirstUpload = oldUser.FirstUpload
 		user.CreatedAt = oldUser.CreatedAt
 		user.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		buf, err := json.Marshal(user)
@@ -1010,6 +1057,7 @@ func (p *BoltProvider) addFolder(folder *vfs.BaseVirtualFolder) error {
 			return fmt.Errorf("folder %v already exists", folder.Name)
 		}
 		folder.Users = nil
+		folder.Groups = nil
 		return p.addFolderInternal(*folder, bucket)
 	})
 }
@@ -1040,6 +1088,7 @@ func (p *BoltProvider) updateFolder(folder *vfs.BaseVirtualFolder) error {
 		folder.UsedQuotaFiles = oldFolder.UsedQuotaFiles
 		folder.UsedQuotaSize = oldFolder.UsedQuotaSize
 		folder.Users = oldFolder.Users
+		folder.Groups = oldFolder.Groups
 		buf, err := json.Marshal(folder)
 		if err != nil {
 			return err
@@ -1104,7 +1153,7 @@ func (p *BoltProvider) deleteFolderMappings(folder vfs.BaseVirtualFolder, usersB
 	return nil
 }
 
-func (p *BoltProvider) deleteFolder(folder vfs.BaseVirtualFolder) error {
+func (p *BoltProvider) deleteFolder(baseFolder vfs.BaseVirtualFolder) error {
 	return p.dbHandle.Update(func(tx *bolt.Tx) error {
 		bucket, err := p.getFoldersBucket(tx)
 		if err != nil {
@@ -1120,8 +1169,8 @@ func (p *BoltProvider) deleteFolder(folder vfs.BaseVirtualFolder) error {
 		}
 
 		var f []byte
-		if f = bucket.Get([]byte(folder.Name)); f == nil {
-			return util.NewRecordNotFoundError(fmt.Sprintf("folder %v does not exist", folder.Name))
+		if f = bucket.Get([]byte(baseFolder.Name)); f == nil {
+			return util.NewRecordNotFoundError(fmt.Sprintf("folder %v does not exist", baseFolder.Name))
 		}
 		var folder vfs.BaseVirtualFolder
 		err = json.Unmarshal(f, &folder)
@@ -1328,6 +1377,8 @@ func (p *BoltProvider) addGroup(group *Group) error {
 		group.ID = int64(id)
 		group.CreatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		group.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
+		group.Users = nil
+		group.Admins = nil
 		for idx := range group.VirtualFolders {
 			err = p.addRelationToFolderMapping(&group.VirtualFolders[idx].BaseVirtualFolder, nil, group, foldersBucket)
 			if err != nil {
@@ -1379,6 +1430,7 @@ func (p *BoltProvider) updateGroup(group *Group) error {
 		group.ID = oldGroup.ID
 		group.CreatedAt = oldGroup.CreatedAt
 		group.Users = oldGroup.Users
+		group.Admins = oldGroup.Admins
 		group.UpdatedAt = util.GetTimeAsMsSinceEpoch(time.Now())
 		buf, err := json.Marshal(group)
 		if err != nil {
@@ -1404,16 +1456,30 @@ func (p *BoltProvider) deleteGroup(group Group) error {
 			return err
 		}
 		if len(oldGroup.Users) > 0 {
-			return util.NewValidationError(fmt.Sprintf("the group %#v is referenced, it cannot be removed", group.Name))
+			return util.NewValidationError(fmt.Sprintf("the group %#v is referenced, it cannot be removed", oldGroup.Name))
 		}
-		foldersBucket, err := p.getFoldersBucket(tx)
-		if err != nil {
-			return err
-		}
-		for idx := range group.VirtualFolders {
-			err = p.removeRelationFromFolderMapping(group.VirtualFolders[idx], "", group.Name, foldersBucket)
+		if len(oldGroup.VirtualFolders) > 0 {
+			foldersBucket, err := p.getFoldersBucket(tx)
 			if err != nil {
 				return err
+			}
+			for idx := range oldGroup.VirtualFolders {
+				err = p.removeRelationFromFolderMapping(oldGroup.VirtualFolders[idx], "", oldGroup.Name, foldersBucket)
+				if err != nil {
+					return err
+				}
+			}
+		}
+		if len(oldGroup.Admins) > 0 {
+			adminsBucket, err := p.getAdminsBucket(tx)
+			if err != nil {
+				return err
+			}
+			for idx := range oldGroup.Admins {
+				err = p.removeGroupFromAdminMapping(oldGroup.Name, oldGroup.Admins[idx], adminsBucket)
+				if err != nil {
+					return err
+				}
 			}
 		}
 
@@ -2433,6 +2499,63 @@ func (p *BoltProvider) updateTaskTimestamp(name string) error {
 	return ErrNotImplemented
 }
 
+func (p *BoltProvider) setFirstDownloadTimestamp(username string) error {
+	return p.dbHandle.Update(func(tx *bolt.Tx) error {
+		bucket, err := p.getUsersBucket(tx)
+		if err != nil {
+			return err
+		}
+		var u []byte
+		if u = bucket.Get([]byte(username)); u == nil {
+			return util.NewRecordNotFoundError(fmt.Sprintf("username %#v does not exist, unable to set download timestamp",
+				username))
+		}
+		var user User
+		err = json.Unmarshal(u, &user)
+		if err != nil {
+			return err
+		}
+		if user.FirstDownload > 0 {
+			return util.NewGenericError(fmt.Sprintf("first download already set to %v",
+				util.GetTimeFromMsecSinceEpoch(user.FirstDownload)))
+		}
+		user.FirstDownload = util.GetTimeAsMsSinceEpoch(time.Now())
+		buf, err := json.Marshal(user)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(username), buf)
+	})
+}
+
+func (p *BoltProvider) setFirstUploadTimestamp(username string) error {
+	return p.dbHandle.Update(func(tx *bolt.Tx) error {
+		bucket, err := p.getUsersBucket(tx)
+		if err != nil {
+			return err
+		}
+		var u []byte
+		if u = bucket.Get([]byte(username)); u == nil {
+			return util.NewRecordNotFoundError(fmt.Sprintf("username %#v does not exist, unable to set upload timestamp",
+				username))
+		}
+		var user User
+		if err = json.Unmarshal(u, &user); err != nil {
+			return err
+		}
+		if user.FirstUpload > 0 {
+			return util.NewGenericError(fmt.Sprintf("first upload already set to %v",
+				util.GetTimeFromMsecSinceEpoch(user.FirstUpload)))
+		}
+		user.FirstUpload = util.GetTimeAsMsSinceEpoch(time.Now())
+		buf, err := json.Marshal(user)
+		if err != nil {
+			return err
+		}
+		return bucket.Put([]byte(username), buf)
+	})
+}
+
 func (p *BoltProvider) close() error {
 	return p.dbHandle.Close()
 }
@@ -2456,23 +2579,23 @@ func (p *BoltProvider) migrateDatabase() error {
 		providerLog(logger.LevelDebug, "bolt database is up to date, current version: %v", version)
 		return ErrNoInitRequired
 	case version < 19:
-		err = fmt.Errorf("database version %v is too old, please see the upgrading docs", version)
+		err = fmt.Errorf("database schema version %v is too old, please see the upgrading docs", version)
 		providerLog(logger.LevelError, "%v", err)
 		logger.ErrorToConsole("%v", err)
 		return err
-	case version == 19:
-		logger.InfoToConsole(fmt.Sprintf("updating database version: %d -> 20", version))
-		providerLog(logger.LevelInfo, "updating database version: %d -> 20", version)
-		return updateBoltDatabaseVersion(p.dbHandle, 20)
+	case version == 19, version == 20, version == 21:
+		logger.InfoToConsole(fmt.Sprintf("updating database schema version: %d -> 22", version))
+		providerLog(logger.LevelInfo, "updating database schema version: %d -> 22", version)
+		return updateBoltDatabaseVersion(p.dbHandle, 22)
 	default:
 		if version > boltDatabaseVersion {
-			providerLog(logger.LevelError, "database version %v is newer than the supported one: %v", version,
+			providerLog(logger.LevelError, "database schema version %v is newer than the supported one: %v", version,
 				boltDatabaseVersion)
-			logger.WarnToConsole("database version %v is newer than the supported one: %v", version,
+			logger.WarnToConsole("database schema version %v is newer than the supported one: %v", version,
 				boltDatabaseVersion)
 			return nil
 		}
-		return fmt.Errorf("database version not handled: %v", version)
+		return fmt.Errorf("database schema version not handled: %v", version)
 	}
 }
 
@@ -2485,9 +2608,9 @@ func (p *BoltProvider) revertDatabase(targetVersion int) error {
 		return errors.New("current version match target version, nothing to do")
 	}
 	switch dbVersion.Version {
-	case 20:
-		logger.InfoToConsole("downgrading database version: 20 -> 19")
-		providerLog(logger.LevelInfo, "downgrading database version: 20 -> 19")
+	case 20, 21:
+		logger.InfoToConsole("downgrading database schema version: %d -> 19", dbVersion.Version)
+		providerLog(logger.LevelInfo, "downgrading database schema version: %d -> 19", dbVersion.Version)
 		err := p.dbHandle.Update(func(tx *bolt.Tx) error {
 			for _, bucketName := range [][]byte{actionsBucket, rulesBucket} {
 				err := tx.DeleteBucket(bucketName)
@@ -2502,7 +2625,7 @@ func (p *BoltProvider) revertDatabase(targetVersion int) error {
 		}
 		return updateBoltDatabaseVersion(p.dbHandle, 19)
 	default:
-		return fmt.Errorf("database version not handled: %v", dbVersion.Version)
+		return fmt.Errorf("database schema version not handled: %v", dbVersion.Version)
 	}
 }
 
@@ -2705,14 +2828,32 @@ func (p *BoltProvider) removeUserFromGroupMapping(username, groupname string, bu
 	if err != nil {
 		return err
 	}
-	if util.Contains(group.Users, username) {
-		var users []string
-		for _, u := range group.Users {
-			if u != username {
-				users = append(users, u)
-			}
+	var users []string
+	for _, u := range group.Users {
+		if u != username {
+			users = append(users, u)
 		}
-		group.Users = util.RemoveDuplicates(users, false)
+	}
+	group.Users = util.RemoveDuplicates(users, false)
+	buf, err := json.Marshal(group)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(group.Name), buf)
+}
+
+func (p *BoltProvider) addAdminToGroupMapping(username, groupname string, bucket *bolt.Bucket) error {
+	g := bucket.Get([]byte(groupname))
+	if g == nil {
+		return util.NewRecordNotFoundError(fmt.Sprintf("group %q does not exist", groupname))
+	}
+	var group Group
+	err := json.Unmarshal(g, &group)
+	if err != nil {
+		return err
+	}
+	if !util.Contains(group.Admins, username) {
+		group.Admins = append(group.Admins, username)
 		buf, err := json.Marshal(group)
 		if err != nil {
 			return err
@@ -2720,6 +2861,55 @@ func (p *BoltProvider) removeUserFromGroupMapping(username, groupname string, bu
 		return bucket.Put([]byte(group.Name), buf)
 	}
 	return nil
+}
+
+func (p *BoltProvider) removeAdminFromGroupMapping(username, groupname string, bucket *bolt.Bucket) error {
+	g := bucket.Get([]byte(groupname))
+	if g == nil {
+		return util.NewRecordNotFoundError(fmt.Sprintf("group %q does not exist", groupname))
+	}
+	var group Group
+	err := json.Unmarshal(g, &group)
+	if err != nil {
+		return err
+	}
+	var admins []string
+	for _, a := range group.Admins {
+		if a != username {
+			admins = append(admins, a)
+		}
+	}
+	group.Admins = util.RemoveDuplicates(admins, false)
+	buf, err := json.Marshal(group)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(group.Name), buf)
+}
+
+func (p *BoltProvider) removeGroupFromAdminMapping(groupName, adminName string, bucket *bolt.Bucket) error {
+	var a []byte
+	if a = bucket.Get([]byte(adminName)); a == nil {
+		// the admin does not exist so there is no associated group
+		return nil
+	}
+	var admin Admin
+	err := json.Unmarshal(a, &admin)
+	if err != nil {
+		return err
+	}
+	var newGroups []AdminGroupMapping
+	for _, g := range admin.Groups {
+		if g.Name != groupName {
+			newGroups = append(newGroups, g)
+		}
+	}
+	admin.Groups = newGroups
+	buf, err := json.Marshal(admin)
+	if err != nil {
+		return err
+	}
+	return bucket.Put([]byte(adminName), buf)
 }
 
 func (p *BoltProvider) addRelationToFolderMapping(baseFolder *vfs.BaseVirtualFolder, user *User, group *Group, bucket *bolt.Bucket) error {
@@ -2775,7 +2965,7 @@ func (p *BoltProvider) removeRelationFromFolderMapping(folder vfs.VirtualFolder,
 		return err
 	}
 	found := false
-	if username != "" && util.Contains(baseFolder.Users, username) {
+	if username != "" {
 		found = true
 		var newUserMapping []string
 		for _, u := range baseFolder.Users {
@@ -2785,7 +2975,7 @@ func (p *BoltProvider) removeRelationFromFolderMapping(folder vfs.VirtualFolder,
 		}
 		baseFolder.Users = newUserMapping
 	}
-	if groupname != "" && util.Contains(baseFolder.Groups, groupname) {
+	if groupname != "" {
 		found = true
 		var newGroupMapping []string
 		for _, g := range baseFolder.Groups {
@@ -3005,7 +3195,7 @@ func getBoltDatabaseVersion(dbHandle *bolt.DB) (schemaVersion, error) {
 	err := dbHandle.View(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(dbVersionBucket)
 		if bucket == nil {
-			return fmt.Errorf("unable to find database version bucket")
+			return fmt.Errorf("unable to find database schema version bucket")
 		}
 		v := bucket.Get(dbVersionKey)
 		if v == nil {
@@ -3023,7 +3213,7 @@ func updateBoltDatabaseVersion(dbHandle *bolt.DB, version int) error {
 	err := dbHandle.Update(func(tx *bolt.Tx) error {
 		bucket := tx.Bucket(dbVersionBucket)
 		if bucket == nil {
-			return fmt.Errorf("unable to find database version bucket")
+			return fmt.Errorf("unable to find database schema version bucket")
 		}
 		newDbVersion := schemaVersion{
 			Version: version,

@@ -57,13 +57,15 @@ func (s *webDavServer) listenAndServe(compressor *middleware.Compressor) error {
 	}
 	if s.config.Cors.Enabled {
 		c := cors.New(cors.Options{
-			AllowedOrigins:     util.RemoveDuplicates(s.config.Cors.AllowedOrigins, true),
-			AllowedMethods:     util.RemoveDuplicates(s.config.Cors.AllowedMethods, true),
-			AllowedHeaders:     util.RemoveDuplicates(s.config.Cors.AllowedHeaders, true),
-			ExposedHeaders:     util.RemoveDuplicates(s.config.Cors.ExposedHeaders, true),
-			MaxAge:             s.config.Cors.MaxAge,
-			AllowCredentials:   s.config.Cors.AllowCredentials,
-			OptionsPassthrough: true,
+			AllowedOrigins:       util.RemoveDuplicates(s.config.Cors.AllowedOrigins, true),
+			AllowedMethods:       util.RemoveDuplicates(s.config.Cors.AllowedMethods, true),
+			AllowedHeaders:       util.RemoveDuplicates(s.config.Cors.AllowedHeaders, true),
+			ExposedHeaders:       util.RemoveDuplicates(s.config.Cors.ExposedHeaders, true),
+			MaxAge:               s.config.Cors.MaxAge,
+			AllowCredentials:     s.config.Cors.AllowCredentials,
+			OptionsPassthrough:   s.config.Cors.OptionsPassthrough,
+			OptionsSuccessStatus: s.config.Cors.OptionsSuccessStatus,
+			AllowPrivateNetwork:  s.config.Cors.AllowPrivateNetwork,
 		})
 		handler = c.Handler(handler)
 	}
@@ -187,7 +189,9 @@ func (s *webDavServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	user, isCached, lockSystem, loginMethod, err := s.authenticate(r, ipAddr)
 	if err != nil {
 		updateLoginMetrics(&user, ipAddr, loginMethod, err)
-		w.Header().Set("WWW-Authenticate", "Basic realm=\"SFTPGo WebDAV\"")
+		if !s.binding.DisableWWWAuthHeader {
+			w.Header().Set("WWW-Authenticate", "Basic realm=\"SFTPGo WebDAV\"")
+		}
 		http.Error(w, fmt.Sprintf("Authentication error: %v", err), http.StatusUnauthorized)
 		return
 	}

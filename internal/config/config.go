@@ -81,18 +81,19 @@ var (
 		Debug:                      false,
 	}
 	defaultWebDAVDBinding = webdavd.Binding{
-		Address:             "",
-		Port:                0,
-		EnableHTTPS:         false,
-		CertificateFile:     "",
-		CertificateKeyFile:  "",
-		MinTLSVersion:       12,
-		ClientAuthType:      0,
-		TLSCipherSuites:     nil,
-		Prefix:              "",
-		ProxyAllowed:        nil,
-		ClientIPProxyHeader: "",
-		ClientIPHeaderDepth: 0,
+		Address:              "",
+		Port:                 0,
+		EnableHTTPS:          false,
+		CertificateFile:      "",
+		CertificateKeyFile:   "",
+		MinTLSVersion:        12,
+		ClientAuthType:       0,
+		TLSCipherSuites:      nil,
+		Prefix:               "",
+		ProxyAllowed:         nil,
+		ClientIPProxyHeader:  "",
+		ClientIPHeaderDepth:  0,
+		DisableWWWAuthHeader: false,
 	}
 	defaultHTTPDBinding = httpd.Binding{
 		Address:               "",
@@ -285,13 +286,16 @@ func Init() {
 			CACertificates:     []string{},
 			CARevocationLists:  []string{},
 			Cors: webdavd.CorsConfig{
-				Enabled:          false,
-				AllowedOrigins:   []string{},
-				AllowedMethods:   []string{},
-				AllowedHeaders:   []string{},
-				ExposedHeaders:   []string{},
-				AllowCredentials: false,
-				MaxAge:           0,
+				Enabled:              false,
+				AllowedOrigins:       []string{},
+				AllowedMethods:       []string{},
+				AllowedHeaders:       []string{},
+				ExposedHeaders:       []string{},
+				AllowCredentials:     false,
+				MaxAge:               0,
+				OptionsPassthrough:   false,
+				OptionsSuccessStatus: 0,
+				AllowPrivateNetwork:  false,
 			},
 			Cache: webdavd.Cache{
 				Users: webdavd.UsersCacheConfig{
@@ -314,6 +318,7 @@ func Init() {
 			ConnectionString: "",
 			SQLTablesPrefix:  "",
 			SSLMode:          0,
+			DisableSNI:       false,
 			RootCert:         "",
 			ClientCert:       "",
 			ClientKey:        "",
@@ -373,13 +378,16 @@ func Init() {
 			TokenValidation:    0,
 			MaxUploadFileSize:  1048576000,
 			Cors: httpd.CorsConfig{
-				Enabled:          false,
-				AllowedOrigins:   []string{},
-				AllowedMethods:   []string{},
-				AllowedHeaders:   []string{},
-				ExposedHeaders:   []string{},
-				AllowCredentials: false,
-				MaxAge:           0,
+				Enabled:              false,
+				AllowedOrigins:       []string{},
+				AllowedMethods:       []string{},
+				AllowedHeaders:       []string{},
+				ExposedHeaders:       []string{},
+				AllowCredentials:     false,
+				MaxAge:               0,
+				OptionsPassthrough:   false,
+				OptionsSuccessStatus: 0,
+				AllowPrivateNetwork:  false,
 			},
 			Setup: httpd.SetupConfig{
 				InstallationCode:     "",
@@ -1187,6 +1195,12 @@ func getWebDAVDBindingFromEnv(idx int) {
 		isSet = true
 	}
 
+	enableHTTPS, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__ENABLE_HTTPS", idx))
+	if ok {
+		binding.EnableHTTPS = enableHTTPS
+		isSet = true
+	}
+
 	certificateFile, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__CERTIFICATE_FILE", idx))
 	if ok {
 		binding.CertificateFile = certificateFile
@@ -1196,12 +1210,6 @@ func getWebDAVDBindingFromEnv(idx int) {
 	certificateKeyFile, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__CERTIFICATE_KEY_FILE", idx))
 	if ok {
 		binding.CertificateKeyFile = certificateKeyFile
-		isSet = true
-	}
-
-	enableHTTPS, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__ENABLE_HTTPS", idx))
-	if ok {
-		binding.EnableHTTPS = enableHTTPS
 		isSet = true
 	}
 
@@ -1223,13 +1231,19 @@ func getWebDAVDBindingFromEnv(idx int) {
 		isSet = true
 	}
 
+	prefix, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__PREFIX", idx))
+	if ok {
+		binding.Prefix = prefix
+		isSet = true
+	}
+
 	if getWebDAVDBindingProxyConfigsFromEnv(idx, &binding) {
 		isSet = true
 	}
 
-	prefix, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__PREFIX", idx))
+	disableWWWAuth, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_WEBDAVD__BINDINGS__%v__DISABLE_WWW_AUTH_HEADER", idx))
 	if ok {
-		binding.Prefix = prefix
+		binding.DisableWWWAuthHeader = disableWWWAuth
 		isSet = true
 	}
 
@@ -1899,6 +1913,9 @@ func setViperDefaults() {
 	viper.SetDefault("webdavd.cors.allowed_headers", globalConf.WebDAVD.Cors.AllowedHeaders)
 	viper.SetDefault("webdavd.cors.exposed_headers", globalConf.WebDAVD.Cors.ExposedHeaders)
 	viper.SetDefault("webdavd.cors.allow_credentials", globalConf.WebDAVD.Cors.AllowCredentials)
+	viper.SetDefault("webdavd.cors.options_passthrough", globalConf.WebDAVD.Cors.OptionsPassthrough)
+	viper.SetDefault("webdavd.cors.options_success_status", globalConf.WebDAVD.Cors.OptionsSuccessStatus)
+	viper.SetDefault("webdavd.cors.allow_private_network", globalConf.WebDAVD.Cors.AllowPrivateNetwork)
 	viper.SetDefault("webdavd.cors.max_age", globalConf.WebDAVD.Cors.MaxAge)
 	viper.SetDefault("webdavd.cache.users.expiration_time", globalConf.WebDAVD.Cache.Users.ExpirationTime)
 	viper.SetDefault("webdavd.cache.users.max_size", globalConf.WebDAVD.Cache.Users.MaxSize)
@@ -1911,6 +1928,7 @@ func setViperDefaults() {
 	viper.SetDefault("data_provider.username", globalConf.ProviderConf.Username)
 	viper.SetDefault("data_provider.password", globalConf.ProviderConf.Password)
 	viper.SetDefault("data_provider.sslmode", globalConf.ProviderConf.SSLMode)
+	viper.SetDefault("data_provider.disable_sni", globalConf.ProviderConf.DisableSNI)
 	viper.SetDefault("data_provider.root_cert", globalConf.ProviderConf.RootCert)
 	viper.SetDefault("data_provider.client_cert", globalConf.ProviderConf.ClientCert)
 	viper.SetDefault("data_provider.client_key", globalConf.ProviderConf.ClientKey)
@@ -1961,6 +1979,9 @@ func setViperDefaults() {
 	viper.SetDefault("httpd.cors.exposed_headers", globalConf.HTTPDConfig.Cors.ExposedHeaders)
 	viper.SetDefault("httpd.cors.allow_credentials", globalConf.HTTPDConfig.Cors.AllowCredentials)
 	viper.SetDefault("httpd.cors.max_age", globalConf.HTTPDConfig.Cors.MaxAge)
+	viper.SetDefault("httpd.cors.options_passthrough", globalConf.HTTPDConfig.Cors.OptionsPassthrough)
+	viper.SetDefault("httpd.cors.options_success_status", globalConf.HTTPDConfig.Cors.OptionsSuccessStatus)
+	viper.SetDefault("httpd.cors.allow_private_network", globalConf.HTTPDConfig.Cors.AllowPrivateNetwork)
 	viper.SetDefault("httpd.setup.installation_code", globalConf.HTTPDConfig.Setup.InstallationCode)
 	viper.SetDefault("httpd.setup.installation_code_hint", globalConf.HTTPDConfig.Setup.InstallationCodeHint)
 	viper.SetDefault("httpd.hide_support_link", globalConf.HTTPDConfig.HideSupportLink)

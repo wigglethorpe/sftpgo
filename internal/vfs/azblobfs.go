@@ -56,12 +56,11 @@ type AzureBlobFs struct {
 	connectionID string
 	localTempDir string
 	// if not empty this fs is mouted as virtual folder in the specified path
-	mountPath          string
-	config             *AzBlobFsConfig
-	hasContainerAccess bool
-	containerClient    *azblob.ContainerClient
-	ctxTimeout         time.Duration
-	ctxLongTimeout     time.Duration
+	mountPath       string
+	config          *AzBlobFsConfig
+	containerClient *azblob.ContainerClient
+	ctxTimeout      time.Duration
+	ctxLongTimeout  time.Duration
 }
 
 func init() {
@@ -107,23 +106,23 @@ func NewAzBlobFs(connectionID, localTempDir, mountPath string, config AzBlobFsCo
 		if err != nil {
 			return fs, fmt.Errorf("invalid SAS URL: %w", err)
 		}
+		svc, err := azblob.NewServiceClientWithNoCredential(fs.config.SASURL.GetPayload(), clientOptions)
+		if err != nil {
+			return fs, fmt.Errorf("invalid credentials: %v", err)
+		}
 		if parts.ContainerName != "" {
 			if fs.config.Container != "" && fs.config.Container != parts.ContainerName {
 				return fs, fmt.Errorf("container name in SAS URL %#v and container provided %#v do not match",
 					parts.ContainerName, fs.config.Container)
 			}
 			fs.config.Container = parts.ContainerName
+			fs.containerClient, err = svc.NewContainerClient("")
 		} else {
 			if fs.config.Container == "" {
 				return fs, errors.New("container is required with this SAS URL")
 			}
+			fs.containerClient, err = svc.NewContainerClient(fs.config.Container)
 		}
-		svc, err := azblob.NewServiceClientWithNoCredential(fs.config.SASURL.GetPayload(), clientOptions)
-		if err != nil {
-			return fs, fmt.Errorf("invalid credentials: %v", err)
-		}
-		fs.hasContainerAccess = false
-		fs.containerClient, err = svc.NewContainerClient(fs.config.Container)
 		return fs, err
 	}
 
@@ -141,7 +140,6 @@ func NewAzBlobFs(connectionID, localTempDir, mountPath string, config AzBlobFsCo
 	if err != nil {
 		return fs, fmt.Errorf("invalid credentials: %v", err)
 	}
-	fs.hasContainerAccess = true
 	fs.containerClient, err = svc.NewContainerClient(fs.config.Container)
 	return fs, err
 }
@@ -161,17 +159,11 @@ func (fs *AzureBlobFs) ConnectionID() string {
 
 // Stat returns a FileInfo describing the named file
 func (fs *AzureBlobFs) Stat(name string) (os.FileInfo, error) {
-	if name == "" || name == "." {
-		if fs.hasContainerAccess {
-			err := fs.checkIfBucketExists()
-			if err != nil {
-				return nil, err
-			}
-		}
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Now(), false))
+	if name == "" || name == "/" || name == "." {
+		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 	}
 	if fs.config.KeyPrefix == name+"/" {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Now(), false))
+		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 	}
 
 	attrs, err := fs.headObject(name)
@@ -192,7 +184,7 @@ func (fs *AzureBlobFs) Stat(name string) (os.FileInfo, error) {
 		return nil, err
 	}
 	if hasContents {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Now(), false))
+		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 	}
 	return nil, os.ErrNotExist
 }
@@ -463,7 +455,7 @@ func (fs *AzureBlobFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 				if _, ok := prefixes[strings.TrimSuffix(name, "/")]; ok {
 					continue
 				}
-				result = append(result, NewFileInfo(name, true, 0, time.Now(), false))
+				result = append(result, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 				prefixes[strings.TrimSuffix(name, "/")] = true
 			}
 
@@ -472,7 +464,7 @@ func (fs *AzureBlobFs) ReadDir(dirname string) ([]os.FileInfo, error) {
 				name = strings.TrimPrefix(name, prefix)
 				size := int64(0)
 				isDir := false
-				modTime := time.Now()
+				modTime := time.Unix(0, 0)
 				if blobItem.Properties != nil {
 					size = util.GetIntFromPointer(blobItem.Properties.ContentLength)
 					modTime = util.GetTimeFromPointer(blobItem.Properties.LastModified)
@@ -705,7 +697,7 @@ func (fs *AzureBlobFs) Walk(root string, walkFn filepath.WalkFunc) error {
 					continue
 				}
 				blobSize := int64(0)
-				lastModified := time.Now()
+				lastModified := time.Unix(0, 0)
 				isDir := false
 				if blobItem.Properties != nil {
 					contentType := util.GetStringFromPointer(blobItem.Properties.ContentType)
@@ -728,7 +720,7 @@ func (fs *AzureBlobFs) Walk(root string, walkFn filepath.WalkFunc) error {
 	}
 
 	metric.AZListObjectsCompleted(nil)
-	return walkFn(root, NewFileInfo(root, true, 0, time.Now(), false), nil)
+	return walkFn(root, NewFileInfo(root, true, 0, time.Unix(0, 0), false), nil)
 }
 
 // Join joins any number of path elements into a single path
@@ -834,15 +826,6 @@ func (fs *AzureBlobFs) setConfigDefaults() {
 	}
 }
 
-func (fs *AzureBlobFs) checkIfBucketExists() error {
-	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
-	defer cancelFn()
-
-	_, err := fs.containerClient.GetProperties(ctx, &azblob.ContainerGetPropertiesOptions{})
-	metric.AZHeadContainerCompleted(err)
-	return err
-}
-
 func (fs *AzureBlobFs) hasContents(name string) (bool, error) {
 	result := false
 	prefix := fs.getPrefix(name)
@@ -919,7 +902,7 @@ func (fs *AzureBlobFs) handleMultipartDownload(ctx context.Context, blockBlob *a
 	finished := false
 	var wg sync.WaitGroup
 	var errOnce sync.Once
-	var hasError int32
+	var hasError atomic.Bool
 	var poolError error
 
 	poolCtx, poolCancel := context.WithCancel(ctx)
@@ -936,7 +919,7 @@ func (fs *AzureBlobFs) handleMultipartDownload(ctx context.Context, blockBlob *a
 		offset = end
 
 		guard <- struct{}{}
-		if atomic.LoadInt32(&hasError) == 1 {
+		if hasError.Load() {
 			fsLog(fs, logger.LevelDebug, "pool error, download for part %v not started", part)
 			break
 		}
@@ -958,7 +941,7 @@ func (fs *AzureBlobFs) handleMultipartDownload(ctx context.Context, blockBlob *a
 			if err != nil {
 				errOnce.Do(func() {
 					fsLog(fs, logger.LevelError, "multipart download error: %+v", err)
-					atomic.StoreInt32(&hasError, 1)
+					hasError.Store(true)
 					poolError = fmt.Errorf("multipart download error: %w", err)
 					poolCancel()
 				})
@@ -988,7 +971,7 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 	var blocks []string
 	var wg sync.WaitGroup
 	var errOnce sync.Once
-	var hasError int32
+	var hasError atomic.Bool
 	var poolError error
 
 	poolCtx, poolCancel := context.WithCancel(ctx)
@@ -1016,7 +999,7 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 		blocks = append(blocks, blockID)
 
 		guard <- struct{}{}
-		if atomic.LoadInt32(&hasError) == 1 {
+		if hasError.Load() {
 			fsLog(fs, logger.LevelError, "pool error, upload for part %v not started", part)
 			pool.releaseBuffer(buf)
 			break
@@ -1040,7 +1023,7 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 			if err != nil {
 				errOnce.Do(func() {
 					fsLog(fs, logger.LevelDebug, "multipart upload error: %+v", err)
-					atomic.StoreInt32(&hasError, 1)
+					hasError.Store(true)
 					poolError = fmt.Errorf("multipart upload error: %w", err)
 					poolCancel()
 				})

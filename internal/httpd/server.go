@@ -95,7 +95,7 @@ func (s *httpdServer) listenAndServe() error {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 16, // 64KB
+		MaxHeaderBytes:    1 << 18, // 256KB
 		ErrorLog:          log.New(&logger.StdLoggerWrapper{Sender: logSender}, "", 0),
 	}
 	if certMgr != nil && s.binding.EnableHTTPS {
@@ -1138,12 +1138,15 @@ func (s *httpdServer) initializeRouter() {
 	}
 	if s.cors.Enabled {
 		c := cors.New(cors.Options{
-			AllowedOrigins:   util.RemoveDuplicates(s.cors.AllowedOrigins, true),
-			AllowedMethods:   util.RemoveDuplicates(s.cors.AllowedMethods, true),
-			AllowedHeaders:   util.RemoveDuplicates(s.cors.AllowedHeaders, true),
-			ExposedHeaders:   util.RemoveDuplicates(s.cors.ExposedHeaders, true),
-			MaxAge:           s.cors.MaxAge,
-			AllowCredentials: s.cors.AllowCredentials,
+			AllowedOrigins:       util.RemoveDuplicates(s.cors.AllowedOrigins, true),
+			AllowedMethods:       util.RemoveDuplicates(s.cors.AllowedMethods, true),
+			AllowedHeaders:       util.RemoveDuplicates(s.cors.AllowedHeaders, true),
+			ExposedHeaders:       util.RemoveDuplicates(s.cors.ExposedHeaders, true),
+			MaxAge:               s.cors.MaxAge,
+			AllowCredentials:     s.cors.AllowCredentials,
+			OptionsPassthrough:   s.cors.OptionsPassthrough,
+			OptionsSuccessStatus: s.cors.OptionsSuccessStatus,
+			AllowPrivateNetwork:  s.cors.AllowPrivateNetwork,
 		})
 		s.router.Use(c.Handler)
 	}
@@ -1454,10 +1457,9 @@ func (s *httpdServer) setupWebClientRoutes() {
 				Delete(webClientDirsPath, deleteUserDir)
 			router.With(s.checkSecondFactorRequirement, s.refreshCookie).
 				Get(webClientDownloadZipPath, s.handleWebClientDownloadZip)
-			router.With(s.checkSecondFactorRequirement, s.refreshCookie, s.requireBuiltinLogin).
-				Get(webClientProfilePath, s.handleClientGetProfile)
-			router.With(s.checkSecondFactorRequirement, s.requireBuiltinLogin).
-				Post(webClientProfilePath, s.handleWebClientProfilePost)
+			router.With(s.checkSecondFactorRequirement, s.refreshCookie).Get(webClientProfilePath,
+				s.handleClientGetProfile)
+			router.With(s.checkSecondFactorRequirement).Post(webClientProfilePath, s.handleWebClientProfilePost)
 			router.With(s.checkSecondFactorRequirement, s.checkHTTPUserPerm(sdk.WebClientPasswordChangeDisabled)).
 				Get(webChangeClientPwdPath, s.handleWebClientChangePwd)
 			router.With(s.checkSecondFactorRequirement, s.checkHTTPUserPerm(sdk.WebClientPasswordChangeDisabled)).

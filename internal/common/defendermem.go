@@ -209,6 +209,12 @@ func (d *memoryDefender) AddEvent(ip string, event HostEvent) {
 			d.banned[ip] = time.Now().Add(time.Duration(d.config.BanTime) * time.Minute)
 			delete(d.hosts, ip)
 			d.cleanupBanned()
+			eventManager.handleIPBlockedEvent(EventParams{
+				Event:     ipBlockedEventName,
+				IP:        ip,
+				Timestamp: time.Now().UnixNano(),
+				Status:    1,
+			})
 		} else {
 			d.hosts[ip] = hs
 		}

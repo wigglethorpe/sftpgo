@@ -94,25 +94,24 @@ func isZeroTime(t time.Time) bool {
 }
 
 type baseClientPage struct {
-	Title            string
-	CurrentURL       string
-	FilesURL         string
-	SharesURL        string
-	ShareURL         string
-	ProfileURL       string
-	ChangePwdURL     string
-	StaticURL        string
-	LogoutURL        string
-	MFAURL           string
-	MFATitle         string
-	FilesTitle       string
-	SharesTitle      string
-	ProfileTitle     string
-	Version          string
-	CSRFToken        string
-	HasExternalLogin bool
-	LoggedUser       *dataprovider.User
-	Branding         UIBranding
+	Title        string
+	CurrentURL   string
+	FilesURL     string
+	SharesURL    string
+	ShareURL     string
+	ProfileURL   string
+	ChangePwdURL string
+	StaticURL    string
+	LogoutURL    string
+	MFAURL       string
+	MFATitle     string
+	FilesTitle   string
+	SharesTitle  string
+	ProfileTitle string
+	Version      string
+	CSRFToken    string
+	LoggedUser   *dataprovider.User
+	Branding     UIBranding
 }
 
 type dirMapping struct {
@@ -351,25 +350,24 @@ func (s *httpdServer) getBaseClientPageData(title, currentURL string, r *http.Re
 	v := version.Get()
 
 	return baseClientPage{
-		Title:            title,
-		CurrentURL:       currentURL,
-		FilesURL:         webClientFilesPath,
-		SharesURL:        webClientSharesPath,
-		ShareURL:         webClientSharePath,
-		ProfileURL:       webClientProfilePath,
-		ChangePwdURL:     webChangeClientPwdPath,
-		StaticURL:        webStaticFilesPath,
-		LogoutURL:        webClientLogoutPath,
-		MFAURL:           webClientMFAPath,
-		MFATitle:         pageClient2FATitle,
-		FilesTitle:       pageClientFilesTitle,
-		SharesTitle:      pageClientSharesTitle,
-		ProfileTitle:     pageClientProfileTitle,
-		Version:          fmt.Sprintf("%v-%v", v.Version, v.CommitHash),
-		CSRFToken:        csrfToken,
-		HasExternalLogin: isLoggedInWithOIDC(r),
-		LoggedUser:       getUserFromToken(r),
-		Branding:         s.binding.Branding.WebClient,
+		Title:        title,
+		CurrentURL:   currentURL,
+		FilesURL:     webClientFilesPath,
+		SharesURL:    webClientSharesPath,
+		ShareURL:     webClientSharePath,
+		ProfileURL:   webClientProfilePath,
+		ChangePwdURL: webChangeClientPwdPath,
+		StaticURL:    webStaticFilesPath,
+		LogoutURL:    webClientLogoutPath,
+		MFAURL:       webClientMFAPath,
+		MFATitle:     pageClient2FATitle,
+		FilesTitle:   pageClientFilesTitle,
+		SharesTitle:  pageClientSharesTitle,
+		ProfileTitle: pageClientProfileTitle,
+		Version:      fmt.Sprintf("%v-%v", v.Version, v.CommitHash),
+		CSRFToken:    csrfToken,
+		LoggedUser:   getUserFromToken(r),
+		Branding:     s.binding.Branding.WebClient,
 	}
 }
 
@@ -747,7 +745,7 @@ func (s *httpdServer) handleShareGetFiles(w http.ResponseWriter, r *http.Request
 
 	var info os.FileInfo
 	if name == "/" {
-		info = vfs.NewFileInfo(name, true, 0, time.Now(), false)
+		info = vfs.NewFileInfo(name, true, 0, time.Unix(0, 0), false)
 	} else {
 		info, err = connection.Stat(name, 1)
 	}
@@ -881,7 +879,7 @@ func (s *httpdServer) handleClientGetFiles(w http.ResponseWriter, r *http.Reques
 	name := connection.User.GetCleanedPath(r.URL.Query().Get("path"))
 	var info os.FileInfo
 	if name == "/" {
-		info = vfs.NewFileInfo(name, true, 0, time.Now(), false)
+		info = vfs.NewFileInfo(name, true, 0, time.Unix(0, 0), false)
 	} else {
 		info, err = connection.Stat(name, 0)
 	}
@@ -956,6 +954,7 @@ func (s *httpdServer) handleClientEditFile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	reader, err := connection.getFileReader(name, 0, r.Method)
 	if err != nil {
 		s.renderClientMessagePage(w, r, fmt.Sprintf("Unable to get a reader for the file %#v", name), "",
@@ -977,7 +976,20 @@ func (s *httpdServer) handleClientEditFile(w http.ResponseWriter, r *http.Reques
 
 func (s *httpdServer) handleClientAddShareGet(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	claims, err := getTokenClaims(r)
+	if err != nil || claims.Username == "" {
+		s.renderClientForbiddenPage(w, r, "Invalid token claims")
+		return
+	}
+	user, err := dataprovider.GetUserWithGroupSettings(claims.Username)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Unable to retrieve your user", "", getRespStatus(err), nil, "")
+		return
+	}
 	share := &dataprovider.Share{Scope: dataprovider.ShareScopeRead}
+	if user.Filters.DefaultSharesExpiration > 0 {
+		share.ExpiresAt = util.GetTimeAsMsSinceEpoch(time.Now().Add(24 * time.Hour * time.Duration(user.Filters.DefaultSharesExpiration)))
+	}
 	dirName := "/"
 	if _, ok := r.URL.Query()["path"]; ok {
 		dirName = util.CleanPath(r.URL.Query().Get("path"))

@@ -38,10 +38,12 @@ import (
 type BaseConnection struct {
 	// last activity for this connection.
 	// Since this field is accessed atomically we put it as first element of the struct to achieve 64 bit alignment
-	lastActivity int64
+	lastActivity atomic.Int64
+	uploadDone   atomic.Bool
+	downloadDone atomic.Bool
 	// unique ID for a transfer.
 	// This field is accessed atomically so we put it at the beginning of the struct to achieve 64 bit alignment
-	transferID int64
+	transferID atomic.Int64
 	// Unique identifier for the connection
 	ID string
 	// user associated with this connection if any
@@ -62,16 +64,18 @@ func NewBaseConnection(id, protocol, localAddr, remoteAddr string, user dataprov
 		connID = fmt.Sprintf("%s_%s", protocol, id)
 	}
 	user.UploadBandwidth, user.DownloadBandwidth = user.GetBandwidthForIP(util.GetIPFromRemoteAddress(remoteAddr), connID)
-	return &BaseConnection{
-		ID:           connID,
-		User:         user,
-		startTime:    time.Now(),
-		protocol:     protocol,
-		localAddr:    localAddr,
-		remoteAddr:   remoteAddr,
-		lastActivity: time.Now().UnixNano(),
-		transferID:   0,
+	c := &BaseConnection{
+		ID:         connID,
+		User:       user,
+		startTime:  time.Now(),
+		protocol:   protocol,
+		localAddr:  localAddr,
+		remoteAddr: remoteAddr,
 	}
+	c.transferID.Store(0)
+	c.lastActivity.Store(time.Now().UnixNano())
+
+	return c
 }
 
 // Log outputs a log entry to the configured logger
@@ -81,7 +85,7 @@ func (c *BaseConnection) Log(level logger.LogLevel, format string, v ...any) {
 
 // GetTransferID returns an unique transfer ID for this connection
 func (c *BaseConnection) GetTransferID() int64 {
-	return atomic.AddInt64(&c.transferID, 1)
+	return c.transferID.Add(1)
 }
 
 // GetID returns the connection ID
@@ -124,12 +128,12 @@ func (c *BaseConnection) GetConnectionTime() time.Time {
 
 // UpdateLastActivity updates last activity for this connection
 func (c *BaseConnection) UpdateLastActivity() {
-	atomic.StoreInt64(&c.lastActivity, time.Now().UnixNano())
+	c.lastActivity.Store(time.Now().UnixNano())
 }
 
 // GetLastActivity returns the last connection activity
 func (c *BaseConnection) GetLastActivity() time.Time {
-	return time.Unix(0, atomic.LoadInt64(&c.lastActivity))
+	return time.Unix(0, c.lastActivity.Load())
 }
 
 // CloseFS closes the underlying fs
@@ -253,7 +257,7 @@ func (c *BaseConnection) getRealFsPath(fsPath string) string {
 	defer c.RUnlock()
 
 	for _, t := range c.activeTransfers {
-		if p := t.GetRealFsPath(fsPath); len(p) > 0 {
+		if p := t.GetRealFsPath(fsPath); p != "" {
 			return p
 		}
 	}
@@ -526,7 +530,7 @@ func (c *BaseConnection) Rename(virtualSourcePath, virtualTargetPath string) err
 		c.Log(logger.LevelInfo, "denying cross rename due to space limit")
 		return c.GetGenericError(ErrQuotaExceeded)
 	}
-	if err := fsSrc.Rename(fsSourcePath, fsTargetPath); err != nil {
+	if err := fsDst.Rename(fsSourcePath, fsTargetPath); err != nil {
 		c.Log(logger.LevelError, "failed to rename %#v -> %#v: %+v", fsSourcePath, fsTargetPath, err)
 		return c.GetFsError(fsSrc, err)
 	}
@@ -600,7 +604,7 @@ func (c *BaseConnection) DoStat(virtualPath string, mode int, checkFilePatterns 
 	// if virtualPath is a virtual folder
 	vfolders := c.User.GetVirtualFoldersInPath(path.Dir(virtualPath))
 	if _, ok := vfolders[virtualPath]; ok {
-		return vfs.NewFileInfo(virtualPath, true, 0, time.Now(), false), nil
+		return vfs.NewFileInfo(virtualPath, true, 0, time.Unix(0, 0), false), nil
 	}
 	if checkFilePatterns {
 		ok, policy := c.User.IsFileAllowed(virtualPath)
@@ -622,7 +626,7 @@ func (c *BaseConnection) DoStat(virtualPath string, mode int, checkFilePatterns 
 		info, err = fs.Stat(c.getRealFsPath(fsPath))
 	}
 	if err != nil {
-		c.Log(logger.LevelError, "stat error for path %#v: %+v", virtualPath, err)
+		c.Log(logger.LevelWarn, "stat error for path %#v: %+v", virtualPath, err)
 		return info, c.GetFsError(fs, err)
 	}
 	if vfs.IsCryptOsFs(fs) {
@@ -845,8 +849,8 @@ func (c *BaseConnection) hasRenamePerms(virtualSourcePath, virtualTargetPath str
 func (c *BaseConnection) isRenamePermitted(fsSrc, fsDst vfs.Fs, fsSourcePath, fsTargetPath, virtualSourcePath,
 	virtualTargetPath string, fi os.FileInfo,
 ) bool {
-	if !c.isLocalOrSameFolderRename(virtualSourcePath, virtualTargetPath) {
-		c.Log(logger.LevelInfo, "rename %#v->%#v is not allowed: the paths must be local or on the same virtual folder",
+	if !c.isSameResourceRename(virtualSourcePath, virtualTargetPath) {
+		c.Log(logger.LevelInfo, "rename %#v->%#v is not allowed: the paths must be on the same resource",
 			virtualSourcePath, virtualTargetPath)
 		return false
 	}
@@ -858,7 +862,7 @@ func (c *BaseConnection) isRenamePermitted(fsSrc, fsDst vfs.Fs, fsSourcePath, fs
 		c.Log(logger.LevelWarn, "renaming to a directory mapped as virtual folder is not allowed: %#v", fsTargetPath)
 		return false
 	}
-	if fsSrc.GetRelativePath(fsSourcePath) == "/" {
+	if virtualSourcePath == "/" || virtualTargetPath == "/" || fsSrc.GetRelativePath(fsSourcePath) == "/" {
 		c.Log(logger.LevelWarn, "renaming root dir is not allowed")
 		return false
 	}
@@ -1088,8 +1092,7 @@ func (c *BaseConnection) HasSpace(checkFiles, getUsage bool, requestPath string)
 	return result, transferQuota
 }
 
-// returns true if this is a rename on the same fs or local virtual folders
-func (c *BaseConnection) isLocalOrSameFolderRename(virtualSourcePath, virtualTargetPath string) bool {
+func (c *BaseConnection) isSameResourceRename(virtualSourcePath, virtualTargetPath string) bool {
 	sourceFolder, errSrc := c.User.GetVirtualFolderForPath(virtualSourcePath)
 	dstFolder, errDst := c.User.GetVirtualFolderForPath(virtualTargetPath)
 	if errSrc != nil && errDst != nil {
@@ -1099,27 +1102,13 @@ func (c *BaseConnection) isLocalOrSameFolderRename(virtualSourcePath, virtualTar
 		if sourceFolder.Name == dstFolder.Name {
 			return true
 		}
-		// we have different folders, only local fs is supported
-		if sourceFolder.FsConfig.Provider == sdk.LocalFilesystemProvider &&
-			dstFolder.FsConfig.Provider == sdk.LocalFilesystemProvider {
-			return true
-		}
-		return false
-	}
-	if c.User.FsConfig.Provider != sdk.LocalFilesystemProvider {
-		return false
+		// we have different folders, check if they point to the same resource
+		return sourceFolder.FsConfig.IsSameResource(dstFolder.FsConfig)
 	}
 	if errSrc == nil {
-		if sourceFolder.FsConfig.Provider == sdk.LocalFilesystemProvider {
-			return true
-		}
+		return sourceFolder.FsConfig.IsSameResource(c.User.FsConfig)
 	}
-	if errDst == nil {
-		if dstFolder.FsConfig.Provider == sdk.LocalFilesystemProvider {
-			return true
-		}
-	}
-	return false
+	return dstFolder.FsConfig.IsSameResource(c.User.FsConfig)
 }
 
 func (c *BaseConnection) isCrossFoldersRequest(virtualSourcePath, virtualTargetPath string) bool {

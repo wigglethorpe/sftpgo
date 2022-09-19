@@ -27,7 +27,7 @@ info:
     SFTPGo supports groups to simplify the administration of multiple accounts by letting you assign settings once to a group, instead of multiple times to each individual user.
     The SFTPGo WebClient allows end users to change their credentials, browse and manage their files in the browser and setup two-factor authentication which works with Authy, Google Authenticator and other compatible apps.
     From the WebClient each authorized user can also create HTTP/S links to externally share files and folders securely, by setting limits to the number of downloads/uploads, protecting the share with a password, limiting access by source IP address, setting an automatic expiration date.
-  version: 2.3.1-dev
+  version: 2.3.5-dev
   contact:
     name: API support
     url: 'https://github.com/drakkan/sftpgo'
@@ -4343,6 +4343,8 @@ components:
         - 5
         - 6
         - 7
+        - 8
+        - 9
       description: |
         Supported event action types:
           * `1` - HTTP
@@ -4352,17 +4354,36 @@ components:
           * `5` - User quota reset
           * `6` - Folder quota reset
           * `7` - Transfer quota reset
+          * `8` - Data retention check
+          * `9` - Filesystem
+    FilesystemActionTypes:
+      type: integer
+      enum:
+        - 1
+        - 2
+        - 3
+        - 4
+      description: |
+        Supported filesystem action types:
+          * `1` - Rename
+          * `2` - Delete
+          * `3` - Mkdis
+          * `4` - Exist
     EventTriggerTypes:
       type: integer
       enum:
         - 1
         - 2
         - 3
+        - 4
+        - 5
       description: |
         Supported event trigger types:
           * `1` - Filesystem event
           * `2` - Provider event
           * `3` - Schedule
+          * `4` - IP blocked
+          * `5` - Certificate renewal
     LoginMethods:
       type: string
       enum:
@@ -4756,6 +4777,9 @@ components:
         is_anonymous:
           type: boolean
           description: 'If enabled the user can login with any password or no password at all. Anonymous users are supported for FTP and WebDAV protocols and permissions will be automatically set to "list" and "download" (read only)'
+        default_shares_expiration:
+          type: integer
+          description: 'Defines the default expiration for newly created shares as number of days. 0 means no expiration'
       description: Additional user options
     UserFilters:
       allOf:
@@ -4949,6 +4973,15 @@ components:
           maximum: 16
           example: 2
           description: The size of the buffer (in MB) to use for transfers. By enabling buffering, the reads and writes, from/to the remote SFTP server, are split in multiple concurrent requests and this allows data to be transferred at a faster rate, over high latency networks, by overlapping round-trip times. With buffering enabled, resuming uploads is not supported and a file cannot be opened for both reading and writing at the same time. 0 means disabled.
+        equality_check_mode:
+          type: integer
+          enum:
+            - 0
+            - 1
+          description: |
+             Defines how to check if this config points to the same server as another config. If different configs point to the same server the renaming between the fs configs is allowed:
+              * `0` username and endpoint must match. This is the default
+              * `1` only the endpoint must match
     HTTPFsConfig:
       type: object
       properties:
@@ -4963,6 +4996,15 @@ components:
           $ref: '#/components/schemas/Secret'
         skip_tls_verify:
           type: boolean
+        equality_check_mode:
+          type: integer
+          enum:
+            - 0
+            - 1
+          description: |
+             Defines how to check if this config points to the same server as another config. If different configs point to the same server the renaming between the fs configs is allowed:
+              * `0` username and endpoint must match. This is the default
+              * `1` only the endpoint must match
     FilesystemConfig:
       type: object
       properties:
@@ -5162,6 +5204,14 @@ components:
           type: integer
           format: int64
           description: Last user login as unix timestamp in milliseconds. It is saved at most once every 10 minutes
+        first_download:
+          type: integer
+          format: int64
+          description: first download time as unix timestamp in milliseconds
+        first_upload:
+          type: integer
+          format: int64
+          description: first upload time as unix timestamp in milliseconds
         filters:
           $ref: '#/components/schemas/UserFilters'
         filesystem:
@@ -5235,6 +5285,11 @@ components:
         additional_info:
           type: string
           description: Free form text field
+        groups:
+          type: array
+          items:
+            $ref: '#/components/schemas/AdminGroupMapping'
+          description: 'Groups automatically selected for new users created by this admin. The admin will still be able to choose different groups. These settings are only used for this admin UI and they will be ignored in REST API/hooks.'
         created_at:
           type: integer
           format: int64
@@ -5820,6 +5875,11 @@ components:
           items:
             type: string
           description: list of usernames associated with this group
+        admins:
+          type: array
+          items:
+            type: string
+          description: list of admins usernames associated with this group
     GroupMapping:
       type: object
       properties:
@@ -5830,10 +5890,33 @@ components:
           enum:
             - 1
             - 2
+            - 3
           description: |
             Group type:
               * `1` - Primary group
-              * `2` - Secondaru group
+              * `2` - Secondary group
+              * `3` - Membership only, no settings are inherited from this group type
+    AdminGroupMappingOptions:
+      type: object
+      properties:
+        add_to_users_as:
+          enum:
+            - 0
+            - 1
+            - 2
+          description: |
+            Add to new users as:
+              * `0` - the admin's group will be added as membership group for new users
+              * `1` - the admin's group will be added as primary group for new users
+              * `2` - the admin's group will be added as secondary group for new users
+    AdminGroupMapping:
+      type: object
+      properties:
+        name:
+          type: string
+          description: group name
+        options:
+          $ref: '#/components/schemas/AdminGroupMappingOptions'
     BackupData:
       type: object
       properties:
@@ -5963,6 +6046,21 @@ components:
           type: string
         value:
           type: string
+    HTTPPart:
+      type: object
+      properties:
+        name:
+          type: string
+        headers:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyValue'
+          description: 'Additional headers. Content-Disposition header is automatically set. Content-Type header is automatically detect for files to attach'
+        filepath:
+          type: string
+          description: 'path to the file to be sent as an attachment'
+        body:
+          type: string
     EventActionHTTPConfig:
       type: object
       properties:
@@ -5982,7 +6080,8 @@ components:
         timeout:
           type: integer
           minimum: 1
-          maximum: 120
+          maximum: 180
+          description: 'Ignored for multipart requests with files as attachments'
         skip_tls_verify:
           type: boolean
           description: 'if enabled the HTTP client accepts any TLS certificate presented by the server and any host name in that certificate. In this mode, TLS is susceptible to man-in-the-middle attacks. This should be used only for testing.'
@@ -5999,12 +6098,22 @@ components:
         body:
           type: string
           description: HTTP POST/PUT body
+        parts:
+          type: array
+          items:
+            $ref: '#/components/schemas/HTTPPart'
+          description: 'Multipart requests allow to combine one or more sets of data into a single body. For each part, you can set a file path or a body as text. Placeholders are supported in file path, body, header values.'
     EventActionCommandConfig:
       type: object
       properties:
         cmd:
           type: string
           description: absolute path to the command to execute
+        args:
+          type: array
+          items:
+            type: string
+          description: 'command line arguments'
         timeout:
           type: integer
           minimum: 1
@@ -6024,6 +6133,39 @@ components:
           type: string
         body:
           type: string
+        attachments:
+          type: array
+          items:
+            type: string
+          description: 'list of file paths to attach. The total size is limited to 10 MB'
+    EventActionDataRetentionConfig:
+      type: object
+      properties:
+        folders:
+          type: array
+          items:
+            $ref: '#/components/schemas/FolderRetention'
+    EventActionFilesystemConfig:
+      type: object
+      properties:
+        type:
+          $ref: '#/components/schemas/FilesystemActionTypes'
+        renames:
+          type: array
+          items:
+            $ref: '#/components/schemas/KeyValue'
+        mkdirs:
+          type: array
+          items:
+            type: string
+        deletes:
+          type: array
+          items:
+            type: string
+        exist:
+          type: array
+          items:
+            type: string
     BaseEventActionOptions:
       type: object
       properties:
@@ -6033,6 +6175,10 @@ components:
           $ref: '#/components/schemas/EventActionCommandConfig'
         email_config:
           $ref: '#/components/schemas/EventActionEmailConfig'
+        retention_config:
+          $ref: '#/components/schemas/EventActionDataRetentionConfig'
+        fs_config:
+          $ref: '#/components/schemas/EventActionFilesystemConfig'
     BaseEventAction:
       type: object
       properties:
@@ -6095,6 +6241,10 @@ components:
       type: object
       properties:
         names:
+          type: array
+          items:
+            $ref: '#/components/schemas/ConditionPattern'
+        group_names:
           type: array
           items:
             $ref: '#/components/schemas/ConditionPattern'

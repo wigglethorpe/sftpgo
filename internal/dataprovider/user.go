@@ -300,7 +300,7 @@ func (u *User) isFsEqual(other *User) bool {
 	if u.FsConfig.Provider == sdk.LocalFilesystemProvider && u.GetHomeDir() != other.GetHomeDir() {
 		return false
 	}
-	if !u.FsConfig.IsEqual(&other.FsConfig) {
+	if !u.FsConfig.IsEqual(other.FsConfig) {
 		return false
 	}
 	if u.Filters.StartDirectory != other.Filters.StartDirectory {
@@ -319,7 +319,7 @@ func (u *User) isFsEqual(other *User) bool {
 				if f.FsConfig.Provider == sdk.LocalFilesystemProvider && f.MappedPath != f1.MappedPath {
 					return false
 				}
-				if !f.FsConfig.IsEqual(&f1.FsConfig) {
+				if !f.FsConfig.IsEqual(f1.FsConfig) {
 					return false
 				}
 			}
@@ -722,7 +722,7 @@ func (u *User) FilterListDir(dirContents []os.FileInfo, virtualPath string) []os
 		for dir := range vdirs {
 			if fi.Name() == dir {
 				if !fi.IsDir() {
-					fi = vfs.NewFileInfo(dir, true, 0, time.Now(), false)
+					fi = vfs.NewFileInfo(dir, true, 0, time.Unix(0, 0), false)
 					dirContents[index] = fi
 				}
 				delete(vdirs, dir)
@@ -744,7 +744,7 @@ func (u *User) FilterListDir(dirContents []os.FileInfo, virtualPath string) []os
 	}
 
 	for dir := range vdirs {
-		fi := vfs.NewFileInfo(dir, true, 0, time.Now(), false)
+		fi := vfs.NewFileInfo(dir, true, 0, time.Unix(0, 0), false)
 		dirContents = append(dirContents, fi)
 	}
 	return dirContents
@@ -1170,7 +1170,7 @@ func (u *User) GetBandwidthForIP(clientIP, connectionID string) (int64, int64) {
 // IsLoginFromAddrAllowed returns true if the login is allowed from the specified remoteAddr.
 // If AllowedIP is defined only the specified IP/Mask can login.
 // If DeniedIP is defined the specified IP/Mask cannot login.
-// If an IP is both allowed and denied then login will be denied
+// If an IP is both allowed and denied then login will be allowed
 func (u *User) IsLoginFromAddrAllowed(remoteAddr string) bool {
 	if len(u.Filters.AllowedIP) == 0 && len(u.Filters.DeniedIP) == 0 {
 		return true
@@ -1181,15 +1181,6 @@ func (u *User) IsLoginFromAddrAllowed(remoteAddr string) bool {
 		logger.Warn(logSender, "", "login allowed for invalid IP. remote address: %#v", remoteAddr)
 		return true
 	}
-	for _, IPMask := range u.Filters.DeniedIP {
-		_, IPNet, err := net.ParseCIDR(IPMask)
-		if err != nil {
-			return false
-		}
-		if IPNet.Contains(remoteIP) {
-			return false
-		}
-	}
 	for _, IPMask := range u.Filters.AllowedIP {
 		_, IPNet, err := net.ParseCIDR(IPMask)
 		if err != nil {
@@ -1197,6 +1188,15 @@ func (u *User) IsLoginFromAddrAllowed(remoteAddr string) bool {
 		}
 		if IPNet.Contains(remoteIP) {
 			return true
+		}
+	}
+	for _, IPMask := range u.Filters.DeniedIP {
+		_, IPNet, err := net.ParseCIDR(IPMask)
+		if err != nil {
+			return false
+		}
+		if IPNet.Contains(remoteIP) {
+			return false
 		}
 	}
 	return len(u.Filters.AllowedIP) == 0
@@ -1568,8 +1568,27 @@ func (u *User) HasSecondaryGroup(name string) bool {
 	return false
 }
 
+// HasMembershipGroup returns true if the user has the specified membership group
+func (u *User) HasMembershipGroup(name string) bool {
+	for _, g := range u.Groups {
+		if g.Name == name {
+			return g.Type == sdk.GroupTypeMembership
+		}
+	}
+	return false
+}
+
+func (u *User) hasSettingsFromGroups() bool {
+	for _, g := range u.Groups {
+		if g.Type != sdk.GroupTypeMembership {
+			return true
+		}
+	}
+	return false
+}
+
 func (u *User) applyGroupSettings(groupsMapping map[string]Group) {
-	if len(u.Groups) == 0 {
+	if !u.hasSettingsFromGroups() {
 		return
 	}
 	if u.groupSettingsApplied {
@@ -1600,7 +1619,7 @@ func (u *User) applyGroupSettings(groupsMapping map[string]Group) {
 
 // LoadAndApplyGroupSettings update the user by loading and applying the group settings
 func (u *User) LoadAndApplyGroupSettings() error {
-	if len(u.Groups) == 0 {
+	if !u.hasSettingsFromGroups() {
 		return nil
 	}
 	if u.groupSettingsApplied {
@@ -1612,7 +1631,9 @@ func (u *User) LoadAndApplyGroupSettings() error {
 		if g.Type == sdk.GroupTypePrimary {
 			primaryGroupName = g.Name
 		}
-		names = append(names, g.Name)
+		if g.Type != sdk.GroupTypeMembership {
+			names = append(names, g.Name)
+		}
 	}
 	groups, err := provider.getGroupsWithNames(names)
 	if err != nil {
@@ -1728,6 +1749,9 @@ func (u *User) mergePrimaryGroupFilters(filters sdk.BaseUserFilters, replacer *s
 	}
 	if u.Filters.StartDirectory == "" {
 		u.Filters.StartDirectory = u.replacePlaceholder(filters.StartDirectory, replacer)
+	}
+	if u.Filters.DefaultSharesExpiration == 0 {
+		u.Filters.DefaultSharesExpiration = filters.DefaultSharesExpiration
 	}
 }
 
@@ -1878,6 +1902,8 @@ func (u *User) getACopy() User {
 			Status:                   u.Status,
 			ExpirationDate:           u.ExpirationDate,
 			LastLogin:                u.LastLogin,
+			FirstDownload:            u.FirstDownload,
+			FirstUpload:              u.FirstUpload,
 			AdditionalInfo:           u.AdditionalInfo,
 			Description:              u.Description,
 			CreatedAt:                u.CreatedAt,

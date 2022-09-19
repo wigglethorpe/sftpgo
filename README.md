@@ -26,9 +26,23 @@ If you just take and don't return anything back, the project will die in the lon
 
 More [info](https://github.com/drakkan/sftpgo/issues/452).
 
-Thank you to our sponsors!
+### Thank you to our sponsors
+
+#### Platinum sponsors
+
+[<img src="./img/Aledade_logo.png" alt="Aledade logo" width="202" height="70">](https://www.aledade.com/)
+
+#### Bronze sponsors
 
 [<img src="https://www.7digital.com/wp-content/themes/sevendigital/images/top_logo.png" alt="7digital logo">](https://www.7digital.com/)
+
+## Support policy
+
+SFTPGo is an Open Source project and you can of course use it for free but please don't ask for free support as well.
+
+We will check the reported issues to see if you are experiencing a bug and if so we'll will fix it, but will only provide support to project [sponsors/donors](#sponsors).
+
+If you report an invalid issue or ask for step-by-step support, your issue will remain open with no answer or will be closed as invalid without further explanation. Thanks for understanding.
 
 ## Features
 
@@ -90,8 +104,10 @@ SFTPGo is developed and tested on Linux. After each commit, the code is automati
 ## Requirements
 
 - Go as build only dependency. We support the Go version(s) used in [continuous integration workflows](./.github/workflows).
-- A suitable SQL server to use as data provider: PostgreSQL 9.4+, MySQL 5.6+, SQLite 3.x, CockroachDB stable.
-- The SQL server is optional: you can choose to use an embedded bolt database as key/value store or an in memory data provider.
+- A suitable SQL server to use as data provider:
+  - upstream supported versions of PostgreSQL, MySQL and MariaDB.
+  - CockroachDB stable.
+- The SQL server is optional: you can choose to use an embedded SQLite, bolt or in memory data provider.
 
 ## Installation
 
@@ -232,16 +248,18 @@ The `revertprovider` command is not supported for the memory provider.
 
 Please note that we only support the current release branch and the current main branch, if you find a bug it is better to report it rather than downgrading to an older unsupported version.
 
-## Users and folders management
+## Users, groups and folders management
 
-After starting SFTPGo you can manage users and folders using:
+After starting SFTPGo you can manage users, groups, folders and other resources using:
 
 - the [web based administration interface](./docs/web-admin.md)
 - the [REST API](./docs/rest-api.md)
 
-To support embedded data providers like `bolt` and `SQLite` we can't have a CLI that directly write users and folders to the data provider, we always have to use the REST API.
+To support embedded data providers like `bolt` and `SQLite`, which do not support concurrent connections, we can't have a CLI that directly write users and other resources to the data provider, we always have to use the REST API.
 
-Full details for users, folders, admins and other resources are documented in the [OpenAPI](./openapi/openapi.yaml) schema. If you want to render the schema without importing it manually, you can explore it on [Stoplight](https://sftpgo.stoplight.io/docs/sftpgo/openapi.yaml).
+Full details for users, groups, folders, admins and other resources are documented in the [OpenAPI](./openapi/openapi.yaml) schema. If you want to render the schema without importing it manually, you can explore it on [Stoplight](https://sftpgo.stoplight.io/docs/sftpgo/openapi.yaml).
+
+:warning: SFTPGo users, groups and folders are virtual and therefore unrelated to the system ones. There is no need to create system-wide users and groups.
 
 ## Tutorials
 

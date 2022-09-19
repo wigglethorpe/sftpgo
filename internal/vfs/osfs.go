@@ -116,6 +116,9 @@ func (*OsFs) Create(name string, flag int) (File, *PipeWriter, func(), error) {
 
 // Rename renames (moves) source to target
 func (fs *OsFs) Rename(source, target string) error {
+	if source == target {
+		return nil
+	}
 	err := os.Rename(source, target)
 	if err != nil && isCrossDeviceError(err) {
 		fsLog(fs, logger.LevelError, "cross device error detected while renaming %#v -> %#v. Trying a copy and remove, this could take a long time",
@@ -370,7 +373,7 @@ func (fs *OsFs) RealPath(p string) (string, error) {
 func (fs *OsFs) GetDirSize(dirname string) (int, int64, error) {
 	numFiles := 0
 	size := int64(0)
-	isDir, err := IsDirectory(fs, dirname)
+	isDir, err := isDirectory(fs, dirname)
 	if err == nil && isDir {
 		err = filepath.Walk(dirname, func(_ string, info os.FileInfo, err error) error {
 			if err != nil {

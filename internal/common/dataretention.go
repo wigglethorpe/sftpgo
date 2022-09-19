@@ -66,7 +66,7 @@ func (c *ActiveRetentionChecks) Get() []RetentionCheck {
 
 	checks := make([]RetentionCheck, 0, len(c.Checks))
 	for _, check := range c.Checks {
-		foldersCopy := make([]FolderRetention, len(check.Folders))
+		foldersCopy := make([]dataprovider.FolderRetention, len(check.Folders))
 		copy(foldersCopy, check.Folders)
 		notificationsCopy := make([]string, len(check.Notifications))
 		copy(notificationsCopy, check.Notifications)
@@ -124,37 +124,6 @@ func (c *ActiveRetentionChecks) remove(username string) bool {
 	return false
 }
 
-// FolderRetention defines the retention policy for the specified directory path
-type FolderRetention struct {
-	// Path is the exposed virtual directory path, if no other specific retention is defined,
-	// the retention applies for sub directories too. For example if retention is defined
-	// for the paths "/" and "/sub" then the retention for "/" is applied for any file outside
-	// the "/sub" directory
-	Path string `json:"path"`
-	// Retention time in hours. 0 means exclude this path
-	Retention int `json:"retention"`
-	// DeleteEmptyDirs defines if empty directories will be deleted.
-	// The user need the delete permission
-	DeleteEmptyDirs bool `json:"delete_empty_dirs,omitempty"`
-	// IgnoreUserPermissions defines if delete files even if the user does not have the delete permission.
-	// The default is "false" which means that files will be skipped if the user does not have the permission
-	// to delete them. This applies to sub directories too.
-	IgnoreUserPermissions bool `json:"ignore_user_permissions,omitempty"`
-}
-
-func (f *FolderRetention) isValid() error {
-	f.Path = path.Clean(f.Path)
-	if !path.IsAbs(f.Path) {
-		return util.NewValidationError(fmt.Sprintf("folder retention: invalid path %#v, please specify an absolute POSIX path",
-			f.Path))
-	}
-	if f.Retention < 0 {
-		return util.NewValidationError(fmt.Sprintf("invalid folder retention %v, it must be greater or equal to zero",
-			f.Retention))
-	}
-	return nil
-}
-
 type folderRetentionCheckResult struct {
 	Path         string        `json:"path"`
 	Retention    int           `json:"retention"`
@@ -172,13 +141,13 @@ type RetentionCheck struct {
 	// retention check start time as unix timestamp in milliseconds
 	StartTime int64 `json:"start_time"`
 	// affected folders
-	Folders []FolderRetention `json:"folders"`
+	Folders []dataprovider.FolderRetention `json:"folders"`
 	// how cleanup results will be notified
 	Notifications []RetentionCheckNotification `json:"notifications,omitempty"`
 	// email to use if the notification method is set to email
 	Email string `json:"email,omitempty"`
 	// Cleanup results
-	results []*folderRetentionCheckResult `json:"-"`
+	results []folderRetentionCheckResult `json:"-"`
 	conn    *BaseConnection
 }
 
@@ -188,7 +157,7 @@ func (c *RetentionCheck) Validate() error {
 	nothingToDo := true
 	for idx := range c.Folders {
 		f := &c.Folders[idx]
-		if err := f.isValid(); err != nil {
+		if err := f.Validate(); err != nil {
 			return err
 		}
 		if f.Retention > 0 {
@@ -230,7 +199,7 @@ func (c *RetentionCheck) updateUserPermissions() {
 	}
 }
 
-func (c *RetentionCheck) getFolderRetention(folderPath string) (FolderRetention, error) {
+func (c *RetentionCheck) getFolderRetention(folderPath string) (dataprovider.FolderRetention, error) {
 	dirsForPath := util.GetDirsForVirtualPath(folderPath)
 	for _, dirPath := range dirsForPath {
 		for _, folder := range c.Folders {
@@ -240,7 +209,7 @@ func (c *RetentionCheck) getFolderRetention(folderPath string) (FolderRetention,
 		}
 	}
 
-	return FolderRetention{}, fmt.Errorf("unable to find folder retention for %#v", folderPath)
+	return dataprovider.FolderRetention{}, fmt.Errorf("unable to find folder retention for %#v", folderPath)
 }
 
 func (c *RetentionCheck) removeFile(virtualPath string, info os.FileInfo) error {
@@ -254,10 +223,12 @@ func (c *RetentionCheck) removeFile(virtualPath string, info os.FileInfo) error 
 func (c *RetentionCheck) cleanupFolder(folderPath string) error {
 	deleteFilesPerms := []string{dataprovider.PermDelete, dataprovider.PermDeleteFiles}
 	startTime := time.Now()
-	result := &folderRetentionCheckResult{
+	result := folderRetentionCheckResult{
 		Path: folderPath,
 	}
-	c.results = append(c.results, result)
+	defer func() {
+		c.results = append(c.results, result)
+	}()
 	if !c.conn.User.HasPerm(dataprovider.PermListItems, folderPath) || !c.conn.User.HasAnyPerm(deleteFilesPerms, folderPath) {
 		result.Elapsed = time.Since(startTime)
 		result.Info = "data retention check skipped: no permissions"
@@ -332,7 +303,15 @@ func (c *RetentionCheck) cleanupFolder(folderPath string) error {
 }
 
 func (c *RetentionCheck) checkEmptyDirRemoval(folderPath string) {
-	if folderPath != "/" && c.conn.User.HasAnyPerm([]string{
+	if folderPath == "/" {
+		return
+	}
+	for _, folder := range c.Folders {
+		if folderPath == folder.Path {
+			return
+		}
+	}
+	if c.conn.User.HasAnyPerm([]string{
 		dataprovider.PermDelete,
 		dataprovider.PermDeleteDirs,
 	}, path.Dir(folderPath),
@@ -346,7 +325,7 @@ func (c *RetentionCheck) checkEmptyDirRemoval(folderPath string) {
 }
 
 // Start starts the retention check
-func (c *RetentionCheck) Start() {
+func (c *RetentionCheck) Start() error {
 	c.conn.Log(logger.LevelInfo, "retention check started")
 	defer RetentionChecks.remove(c.conn.User.Username)
 	defer c.conn.CloseFS() //nolint:errcheck
@@ -357,13 +336,14 @@ func (c *RetentionCheck) Start() {
 			if err := c.cleanupFolder(folder.Path); err != nil {
 				c.conn.Log(logger.LevelError, "retention check failed, unable to cleanup folder %#v", folder.Path)
 				c.sendNotifications(time.Since(startTime), err)
-				return
+				return err
 			}
 		}
 	}
 
 	c.conn.Log(logger.LevelInfo, "retention check completed")
 	c.sendNotifications(time.Since(startTime), nil)
+	return nil
 }
 
 func (c *RetentionCheck) sendNotifications(elapsed time.Duration, err error) {
@@ -414,6 +394,9 @@ func (c *RetentionCheck) sendEmailNotification(elapsed time.Duration, errCheck e
 }
 
 func (c *RetentionCheck) sendHookNotification(elapsed time.Duration, errCheck error) error {
+	startNewHook()
+	defer hookEnded()
+
 	data := make(map[string]any)
 	totalDeletedFiles := 0
 	totalDeletedSize := int64(0)

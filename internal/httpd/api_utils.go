@@ -232,6 +232,7 @@ func getCompressedFileName(username string, files []string) string {
 func renderCompressedFiles(w http.ResponseWriter, conn *Connection, baseDir string, files []string,
 	share *dataprovider.Share,
 ) {
+	conn.User.CheckFsRoot(conn.ID) //nolint:errcheck
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Accept-Ranges", "none")
 	w.Header().Set("Content-Transfer-Encoding", "binary")
@@ -263,14 +264,19 @@ func addZipEntry(wr *zip.Writer, conn *Connection, entryPath, baseDir string) er
 		conn.Log(logger.LevelDebug, "unable to add zip entry %#v, stat error: %v", entryPath, err)
 		return err
 	}
+	entryName, err := getZipEntryName(entryPath, baseDir)
+	if err != nil {
+		conn.Log(logger.LevelError, "unable to get zip entry name: %v", err)
+		return err
+	}
 	if info.IsDir() {
-		_, err := wr.CreateHeader(&zip.FileHeader{
-			Name:     getZipEntryName(entryPath, baseDir) + "/",
+		_, err = wr.CreateHeader(&zip.FileHeader{
+			Name:     entryName + "/",
 			Method:   zip.Deflate,
 			Modified: info.ModTime(),
 		})
 		if err != nil {
-			conn.Log(logger.LevelDebug, "unable to create zip entry %#v: %v", entryPath, err)
+			conn.Log(logger.LevelError, "unable to create zip entry %#v: %v", entryPath, err)
 			return err
 		}
 		contents, err := conn.ReadDir(entryPath)
@@ -288,7 +294,7 @@ func addZipEntry(wr *zip.Writer, conn *Connection, entryPath, baseDir string) er
 	}
 	if !info.Mode().IsRegular() {
 		// we only allow regular files
-		conn.Log(logger.LevelDebug, "skipping zip entry for non regular file %#v", entryPath)
+		conn.Log(logger.LevelInfo, "skipping zip entry for non regular file %#v", entryPath)
 		return nil
 	}
 	reader, err := conn.getFileReader(entryPath, 0, http.MethodGet)
@@ -299,21 +305,24 @@ func addZipEntry(wr *zip.Writer, conn *Connection, entryPath, baseDir string) er
 	defer reader.Close()
 
 	f, err := wr.CreateHeader(&zip.FileHeader{
-		Name:     getZipEntryName(entryPath, baseDir),
+		Name:     entryName,
 		Method:   zip.Deflate,
 		Modified: info.ModTime(),
 	})
 	if err != nil {
-		conn.Log(logger.LevelDebug, "unable to create zip entry %#v: %v", entryPath, err)
+		conn.Log(logger.LevelError, "unable to create zip entry %#v: %v", entryPath, err)
 		return err
 	}
 	_, err = io.Copy(f, reader)
 	return err
 }
 
-func getZipEntryName(entryPath, baseDir string) string {
+func getZipEntryName(entryPath, baseDir string) (string, error) {
+	if !strings.HasPrefix(entryPath, baseDir) {
+		return "", fmt.Errorf("entry path %q is outside base dir %q", entryPath, baseDir)
+	}
 	entryPath = strings.TrimPrefix(entryPath, baseDir)
-	return strings.TrimPrefix(entryPath, "/")
+	return strings.TrimPrefix(entryPath, "/"), nil
 }
 
 func checkDownloadFileFromShare(share *dataprovider.Share, info os.FileInfo) error {
@@ -326,6 +335,7 @@ func checkDownloadFileFromShare(share *dataprovider.Share, info os.FileInfo) err
 func downloadFile(w http.ResponseWriter, r *http.Request, connection *Connection, name string,
 	info os.FileInfo, inline bool, share *dataprovider.Share,
 ) (int, error) {
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	err := checkDownloadFileFromShare(share, info)
 	if err != nil {
 		return http.StatusBadRequest, err

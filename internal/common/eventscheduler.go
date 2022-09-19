@@ -12,16 +12,32 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-//go:build linux
-// +build linux
+package common
 
-package config
+import (
+	"time"
 
-import "github.com/spf13/viper"
+	"github.com/robfig/cron/v3"
 
-// linux specific config search path
-func setViperAdditionalConfigPaths() {
-	viper.AddConfigPath("$HOME/.config/sftpgo")
-	viper.AddConfigPath("/etc/sftpgo")
-	viper.AddConfigPath("/usr/local/etc/sftpgo")
+	"github.com/drakkan/sftpgo/v2/internal/util"
+)
+
+var (
+	eventScheduler *cron.Cron
+)
+
+func stopEventScheduler() {
+	if eventScheduler != nil {
+		eventScheduler.Stop()
+		eventScheduler = nil
+	}
+}
+
+func startEventScheduler() {
+	stopEventScheduler()
+
+	eventScheduler = cron.New(cron.WithLocation(time.UTC))
+	_, err := eventScheduler.AddFunc("@every 10m", eventManager.loadRules)
+	util.PanicOnError(err)
+	eventScheduler.Start()
 }

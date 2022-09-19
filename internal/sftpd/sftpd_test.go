@@ -510,8 +510,16 @@ func TestBasicSFTPHandling(t *testing.T) {
 		assert.NoError(t, err)
 		err = sftpUploadFile(testFilePath, path.Join("/missing_dir", testFileName), testFileSize, client)
 		assert.Error(t, err)
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), user.FirstUpload)
+		assert.Equal(t, int64(0), user.FirstDownload)
 		err = sftpUploadFile(testFilePath, testFileName, testFileSize, client)
 		assert.NoError(t, err)
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Greater(t, user.FirstUpload, int64(0))
+		assert.Equal(t, int64(0), user.FirstDownload)
 		localDownloadPath := filepath.Join(homeBasePath, testDLFileName)
 		err = sftpDownloadFile(testFileName, localDownloadPath, testFileSize, client)
 		assert.NoError(t, err)
@@ -527,6 +535,8 @@ func TestBasicSFTPHandling(t *testing.T) {
 		assert.NoError(t, err)
 		assert.Equal(t, expectedQuotaFiles-1, user.UsedQuotaFiles)
 		assert.Equal(t, expectedQuotaSize-testFileSize, user.UsedQuotaSize)
+		assert.Greater(t, user.FirstUpload, int64(0))
+		assert.Greater(t, user.FirstDownload, int64(0))
 		err = os.Remove(testFilePath)
 		assert.NoError(t, err)
 		err = os.Remove(localDownloadPath)
@@ -1104,12 +1114,12 @@ func TestConcurrency(t *testing.T) {
 	err = createTestFile(testFilePath, testFileSize)
 	assert.NoError(t, err)
 
-	closedConns := int32(0)
+	var closedConns atomic.Int32
 	for i := 0; i < numLogins; i++ {
 		wg.Add(1)
 		go func(counter int) {
 			defer wg.Done()
-			defer atomic.AddInt32(&closedConns, 1)
+			defer closedConns.Add(1)
 
 			conn, client, err := getSftpClient(user, usePubKey)
 			if assert.NoError(t, err) {
@@ -1129,7 +1139,7 @@ func TestConcurrency(t *testing.T) {
 		maxConns := 0
 		maxSessions := 0
 		for {
-			servedReqs := atomic.LoadInt32(&closedConns)
+			servedReqs := closedConns.Load()
 			if servedReqs > 0 {
 				stats := common.Connections.GetStats()
 				if len(stats) > maxConns {
@@ -1213,9 +1223,6 @@ func TestRealPath(t *testing.T) {
 	for _, user := range []dataprovider.User{localUser, sftpUser} {
 		conn, client, err := getSftpClient(user, usePubKey)
 		if assert.NoError(t, err) {
-			defer conn.Close()
-			defer client.Close()
-
 			p, err := client.RealPath("../..")
 			assert.NoError(t, err)
 			assert.Equal(t, "/", p)
@@ -1247,6 +1254,9 @@ func TestRealPath(t *testing.T) {
 			assert.NoError(t, err)
 			_, err = client.RealPath(path.Join(subdir, "temp"))
 			assert.ErrorIs(t, err, os.ErrPermission)
+
+			conn.Close()
+			client.Close()
 			err = os.Remove(filepath.Join(localUser.GetHomeDir(), subdir, "temp"))
 			assert.NoError(t, err)
 			if user.Username == localUser.Username {
@@ -4590,14 +4600,14 @@ func TestQuotaScan(t *testing.T) {
 }
 
 func TestMultipleQuotaScans(t *testing.T) {
-	res := dataprovider.QuotaScans.AddUserQuotaScan(defaultUsername)
+	res := common.QuotaScans.AddUserQuotaScan(defaultUsername)
 	assert.True(t, res)
-	res = dataprovider.QuotaScans.AddUserQuotaScan(defaultUsername)
+	res = common.QuotaScans.AddUserQuotaScan(defaultUsername)
 	assert.False(t, res, "add quota must fail if another scan is already active")
-	assert.True(t, dataprovider.QuotaScans.RemoveUserQuotaScan(defaultUsername))
-	activeScans := dataprovider.QuotaScans.GetUsersQuotaScans()
+	assert.True(t, common.QuotaScans.RemoveUserQuotaScan(defaultUsername))
+	activeScans := common.QuotaScans.GetUsersQuotaScans()
 	assert.Equal(t, 0, len(activeScans))
-	assert.False(t, dataprovider.QuotaScans.RemoveUserQuotaScan(defaultUsername))
+	assert.False(t, common.QuotaScans.RemoveUserQuotaScan(defaultUsername))
 }
 
 func TestQuotaLimits(t *testing.T) {
@@ -5224,8 +5234,9 @@ func TestSFTPLoopVirtualFolders(t *testing.T) {
 				Provider: sdk.SFTPFilesystemProvider,
 				SFTPConfig: vfs.SFTPFsConfig{
 					BaseSFTPFsConfig: sdk.BaseSFTPFsConfig{
-						Endpoint: sftpServerAddr,
-						Username: user2.Username,
+						Endpoint:          sftpServerAddr,
+						Username:          user2.Username,
+						EqualityCheckMode: 1,
 					},
 					Password: kms.NewPlainSecret(defaultPassword),
 				},
@@ -6949,15 +6960,15 @@ func TestVirtualFolderQuotaScan(t *testing.T) {
 
 func TestVFolderMultipleQuotaScan(t *testing.T) {
 	folderName := "folder_name"
-	res := dataprovider.QuotaScans.AddVFolderQuotaScan(folderName)
+	res := common.QuotaScans.AddVFolderQuotaScan(folderName)
 	assert.True(t, res)
-	res = dataprovider.QuotaScans.AddVFolderQuotaScan(folderName)
+	res = common.QuotaScans.AddVFolderQuotaScan(folderName)
 	assert.False(t, res)
-	res = dataprovider.QuotaScans.RemoveVFolderQuotaScan(folderName)
+	res = common.QuotaScans.RemoveVFolderQuotaScan(folderName)
 	assert.True(t, res)
-	activeScans := dataprovider.QuotaScans.GetVFoldersQuotaScans()
+	activeScans := common.QuotaScans.GetVFoldersQuotaScans()
 	assert.Len(t, activeScans, 0)
-	res = dataprovider.QuotaScans.RemoveVFolderQuotaScan(folderName)
+	res = common.QuotaScans.RemoveVFolderQuotaScan(folderName)
 	assert.False(t, res)
 }
 
@@ -8359,8 +8370,9 @@ func TestUserFiltersIPMaskConditions(t *testing.T) {
 	assert.True(t, user.IsLoginFromAddrAllowed("192.168.2.6"))
 
 	user.Filters.AllowedIP = append(user.Filters.AllowedIP, "192.168.1.5/32")
-	// if the same ip/mask is both denied and allowed then login must be denied
-	assert.False(t, user.IsLoginFromAddrAllowed("192.168.1.5"))
+	// if the same ip/mask is both denied and allowed then login must be allowed
+	assert.True(t, user.IsLoginFromAddrAllowed("192.168.1.5"))
+	assert.False(t, user.IsLoginFromAddrAllowed("192.168.1.3"))
 	assert.False(t, user.IsLoginFromAddrAllowed("192.168.3.6"))
 
 	user.Filters.DeniedIP = []string{}
@@ -9549,10 +9561,22 @@ func TestSCPBasicHandling(t *testing.T) {
 		// test to download a missing file
 		err = scpDownload(localPath, remoteDownPath, false, false)
 		assert.Error(t, err, "downloading a missing file via scp must fail")
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Equal(t, int64(0), user.FirstUpload)
+		assert.Equal(t, int64(0), user.FirstDownload)
 		err = scpUpload(testFilePath, remoteUpPath, false, false)
 		assert.NoError(t, err)
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Greater(t, user.FirstUpload, int64(0))
+		assert.Equal(t, int64(0), user.FirstDownload)
 		err = scpDownload(localPath, remoteDownPath, false, false)
 		assert.NoError(t, err)
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Greater(t, user.FirstUpload, int64(0))
+		assert.Greater(t, user.FirstDownload, int64(0))
 		fi, err := os.Stat(localPath)
 		if assert.NoError(t, err) {
 			assert.Equal(t, testFileSize, fi.Size())

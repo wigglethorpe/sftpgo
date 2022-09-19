@@ -151,14 +151,10 @@ func (fs *S3Fs) ConnectionID() string {
 func (fs *S3Fs) Stat(name string) (os.FileInfo, error) {
 	var result *FileInfo
 	if name == "" || name == "/" || name == "." {
-		err := fs.checkIfBucketExists()
-		if err != nil {
-			return result, err
-		}
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Now(), false))
+		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 	}
 	if fs.config.KeyPrefix == name+"/" {
-		return NewFileInfo(name, true, 0, time.Now(), false), nil
+		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 	}
 	obj, err := fs.headObject(name)
 	if err == nil {
@@ -172,7 +168,7 @@ func (fs *S3Fs) Stat(name string) (os.FileInfo, error) {
 	// now check if this is a prefix (virtual directory)
 	hasContents, err := fs.hasContents(name)
 	if err == nil && hasContents {
-		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Now(), false))
+		return updateFileInfoModTime(fs.getStorageID(), name, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 	} else if err != nil {
 		return nil, err
 	}
@@ -488,7 +484,7 @@ func (fs *S3Fs) ReadDir(dirname string) ([]os.FileInfo, error) {
 			if _, ok := prefixes[name]; ok {
 				continue
 			}
-			result = append(result, NewFileInfo(name, true, 0, time.Now(), false))
+			result = append(result, NewFileInfo(name, true, 0, time.Unix(0, 0), false))
 			prefixes[name] = true
 		}
 		for _, fileObject := range page.Contents {
@@ -704,7 +700,7 @@ func (fs *S3Fs) Walk(root string, walkFn filepath.WalkFunc) error {
 		page, err := paginator.NextPage(ctx)
 		if err != nil {
 			metric.S3ListObjectsCompleted(err)
-			walkFn(root, NewFileInfo(root, true, 0, time.Now(), false), err) //nolint:errcheck
+			walkFn(root, NewFileInfo(root, true, 0, time.Unix(0, 0), false), err) //nolint:errcheck
 			return err
 		}
 		for _, fileObject := range page.Contents {
@@ -721,7 +717,7 @@ func (fs *S3Fs) Walk(root string, walkFn filepath.WalkFunc) error {
 	}
 
 	metric.S3ListObjectsCompleted(nil)
-	walkFn(root, NewFileInfo(root, true, 0, time.Now(), false), nil) //nolint:errcheck
+	walkFn(root, NewFileInfo(root, true, 0, time.Unix(0, 0), false), nil) //nolint:errcheck
 	return nil
 }
 
@@ -753,17 +749,6 @@ func (fs *S3Fs) resolve(name *string, prefix string) (string, bool) {
 		result = strings.TrimSuffix(result, "/")
 	}
 	return result, isDir
-}
-
-func (fs *S3Fs) checkIfBucketExists() error {
-	ctx, cancelFn := context.WithDeadline(context.Background(), time.Now().Add(fs.ctxTimeout))
-	defer cancelFn()
-
-	_, err := fs.svc.HeadBucket(ctx, &s3.HeadBucketInput{
-		Bucket: aws.String(fs.config.Bucket),
-	})
-	metric.S3HeadBucketCompleted(err)
-	return err
 }
 
 func (fs *S3Fs) setConfigDefaults() {
@@ -850,7 +835,7 @@ func (fs *S3Fs) doMultipartCopy(source, target, contentType string, fileSize int
 	var completedParts []types.CompletedPart
 	var partMutex sync.Mutex
 	var wg sync.WaitGroup
-	var hasError int32
+	var hasError atomic.Bool
 	var errOnce sync.Once
 	var copyError error
 	var partNumber int32
@@ -869,7 +854,7 @@ func (fs *S3Fs) doMultipartCopy(source, target, contentType string, fileSize int
 		offset = end
 
 		guard <- struct{}{}
-		if atomic.LoadInt32(&hasError) == 1 {
+		if hasError.Load() {
 			fsLog(fs, logger.LevelDebug, "previous multipart copy error, copy for part %d not started", partNumber)
 			break
 		}
@@ -895,7 +880,7 @@ func (fs *S3Fs) doMultipartCopy(source, target, contentType string, fileSize int
 			if err != nil {
 				errOnce.Do(func() {
 					fsLog(fs, logger.LevelError, "unable to copy part number %d: %+v", partNum, err)
-					atomic.StoreInt32(&hasError, 1)
+					hasError.Store(true)
 					copyError = fmt.Errorf("error copying part number %d: %w", partNum, err)
 					opCancel()
 

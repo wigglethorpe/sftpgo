@@ -52,13 +52,16 @@ type ServiceStatus struct {
 
 // CorsConfig defines the CORS configuration
 type CorsConfig struct {
-	AllowedOrigins   []string `json:"allowed_origins" mapstructure:"allowed_origins"`
-	AllowedMethods   []string `json:"allowed_methods" mapstructure:"allowed_methods"`
-	AllowedHeaders   []string `json:"allowed_headers" mapstructure:"allowed_headers"`
-	ExposedHeaders   []string `json:"exposed_headers" mapstructure:"exposed_headers"`
-	AllowCredentials bool     `json:"allow_credentials" mapstructure:"allow_credentials"`
-	Enabled          bool     `json:"enabled" mapstructure:"enabled"`
-	MaxAge           int      `json:"max_age" mapstructure:"max_age"`
+	AllowedOrigins       []string `json:"allowed_origins" mapstructure:"allowed_origins"`
+	AllowedMethods       []string `json:"allowed_methods" mapstructure:"allowed_methods"`
+	AllowedHeaders       []string `json:"allowed_headers" mapstructure:"allowed_headers"`
+	ExposedHeaders       []string `json:"exposed_headers" mapstructure:"exposed_headers"`
+	AllowCredentials     bool     `json:"allow_credentials" mapstructure:"allow_credentials"`
+	Enabled              bool     `json:"enabled" mapstructure:"enabled"`
+	MaxAge               int      `json:"max_age" mapstructure:"max_age"`
+	OptionsPassthrough   bool     `json:"options_passthrough" mapstructure:"options_passthrough"`
+	OptionsSuccessStatus int      `json:"options_success_status" mapstructure:"options_success_status"`
+	AllowPrivateNetwork  bool     `json:"allow_private_network" mapstructure:"allow_private_network"`
 }
 
 // UsersCacheConfig defines the cache configuration for users
@@ -119,7 +122,10 @@ type Binding struct {
 	// "10.0.0.1,11.0.0.1,12.0.0.1,13.0.0.1" and the depth is 0, SFTPGo will use "13.0.0.1"
 	// as client IP, if depth is 1, "12.0.0.1" will be used and so on
 	ClientIPHeaderDepth int `json:"client_ip_header_depth" mapstructure:"client_ip_header_depth"`
-	allowHeadersFrom    []func(net.IP) bool
+	// Do not add the WWW-Authenticate header after an authentication error,
+	// only the 401 status code will be sent
+	DisableWWWAuthHeader bool `json:"disable_www_auth_header" mapstructure:"disable_www_auth_header"`
+	allowHeadersFrom     []func(net.IP) bool
 }
 
 func (b *Binding) parseAllowedProxy() error {

@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -40,6 +41,7 @@ const (
 		"DROP TABLE IF EXISTS `{{folders_mapping}}` CASCADE;" +
 		"DROP TABLE IF EXISTS `{{users_folders_mapping}}` CASCADE;" +
 		"DROP TABLE IF EXISTS `{{users_groups_mapping}}` CASCADE;" +
+		"DROP TABLE IF EXISTS `{{admins_groups_mapping}}` CASCADE;" +
 		"DROP TABLE IF EXISTS `{{groups_folders_mapping}}` CASCADE;" +
 		"DROP TABLE IF EXISTS `{{admins}}` CASCADE;" +
 		"DROP TABLE IF EXISTS `{{folders}}` CASCADE;" +
@@ -164,6 +166,22 @@ const (
 		"DROP TABLE `{{events_actions}}` CASCADE;" +
 		"DROP TABLE `{{tasks}}` CASCADE;" +
 		"ALTER TABLE `{{users}}` DROP COLUMN `deleted_at`;"
+	mysqlV21SQL = "ALTER TABLE `{{users}}` ADD COLUMN `first_download` bigint DEFAULT 0 NOT NULL; " +
+		"ALTER TABLE `{{users}}` ALTER COLUMN `first_download` DROP DEFAULT; " +
+		"ALTER TABLE `{{users}}` ADD COLUMN `first_upload` bigint DEFAULT 0 NOT NULL; " +
+		"ALTER TABLE `{{users}}` ALTER COLUMN `first_upload` DROP DEFAULT;"
+	mysqlV21DownSQL = "ALTER TABLE `{{users}}` DROP COLUMN `first_upload`; " +
+		"ALTER TABLE `{{users}}` DROP COLUMN `first_download`;"
+	mysqlV22SQL = "CREATE TABLE `{{admins_groups_mapping}}` (`id` integer AUTO_INCREMENT NOT NULL PRIMARY KEY, " +
+		" `admin_id` integer NOT NULL, `group_id` integer NOT NULL, `options` longtext NOT NULL);" +
+		"ALTER TABLE `{{admins_groups_mapping}}` ADD CONSTRAINT `{{prefix}}unique_admin_group_mapping` " +
+		"UNIQUE (`admin_id`, `group_id`);" +
+		"ALTER TABLE `{{admins_groups_mapping}}` ADD CONSTRAINT `{{prefix}}admins_groups_mapping_admin_id_fk_admins_id` " +
+		"FOREIGN KEY (`admin_id`) REFERENCES `{{admins}}` (`id`) ON DELETE CASCADE;" +
+		"ALTER TABLE `{{admins_groups_mapping}}` ADD CONSTRAINT `{{prefix}}admins_groups_mapping_group_id_fk_groups_id` " +
+		"FOREIGN KEY (`group_id`) REFERENCES `{{groups}}` (`id`) ON DELETE CASCADE;"
+	mysqlV22DownSQL = "ALTER TABLE `{{admins_groups_mapping}}` DROP INDEX `{{prefix}}unique_admin_group_mapping`;" +
+		"DROP TABLE `{{admins_groups_mapping}}` CASCADE;"
 )
 
 // MySQLProvider defines the auth provider for MySQL/MariaDB database
@@ -213,37 +231,8 @@ func getMySQLConnectionString(redactedPwd bool) (string, error) {
 		}
 		sslMode := getSSLMode()
 		if sslMode == "custom" && !redactedPwd {
-			tlsConfig := &tls.Config{}
-			if config.RootCert != "" {
-				rootCAs, err := x509.SystemCertPool()
-				if err != nil {
-					rootCAs = x509.NewCertPool()
-				}
-				rootCrt, err := os.ReadFile(config.RootCert)
-				if err != nil {
-					return "", fmt.Errorf("unable to load root certificate %#v: %v", config.RootCert, err)
-				}
-				if !rootCAs.AppendCertsFromPEM(rootCrt) {
-					return "", fmt.Errorf("unable to parse root certificate %#v", config.RootCert)
-				}
-				tlsConfig.RootCAs = rootCAs
-			}
-			if config.ClientCert != "" && config.ClientKey != "" {
-				clientCert := make([]tls.Certificate, 0, 1)
-				tlsCert, err := tls.LoadX509KeyPair(config.ClientCert, config.ClientKey)
-				if err != nil {
-					return "", fmt.Errorf("unable to load key pair %#v, %#v: %v", config.ClientCert, config.ClientKey, err)
-				}
-				clientCert = append(clientCert, tlsCert)
-				tlsConfig.Certificates = clientCert
-			}
-			if config.SSLMode == 2 {
-				tlsConfig.InsecureSkipVerify = true
-			}
-			providerLog(logger.LevelInfo, "registering custom TLS config, root cert %#v, client cert %#v, client key %#v",
-				config.RootCert, config.ClientCert, config.ClientKey)
-			if err := mysql.RegisterTLSConfig("custom", tlsConfig); err != nil {
-				return "", fmt.Errorf("unable to register tls config: %v", err)
+			if err := registerMySQLCustomTLSConfig(); err != nil {
+				return "", err
 			}
 		}
 		connectionString = fmt.Sprintf("%v:%v@tcp([%v]:%v)/%v?charset=utf8mb4&interpolateParams=true&timeout=10s&parseTime=true&tls=%v&writeTimeout=60s&readTimeout=60s",
@@ -252,6 +241,45 @@ func getMySQLConnectionString(redactedPwd bool) (string, error) {
 		connectionString = config.ConnectionString
 	}
 	return connectionString, nil
+}
+
+func registerMySQLCustomTLSConfig() error {
+	tlsConfig := &tls.Config{}
+	if config.RootCert != "" {
+		rootCAs, err := x509.SystemCertPool()
+		if err != nil {
+			rootCAs = x509.NewCertPool()
+		}
+		rootCrt, err := os.ReadFile(config.RootCert)
+		if err != nil {
+			return fmt.Errorf("unable to load root certificate %#v: %v", config.RootCert, err)
+		}
+		if !rootCAs.AppendCertsFromPEM(rootCrt) {
+			return fmt.Errorf("unable to parse root certificate %#v", config.RootCert)
+		}
+		tlsConfig.RootCAs = rootCAs
+	}
+	if config.ClientCert != "" && config.ClientKey != "" {
+		clientCert := make([]tls.Certificate, 0, 1)
+		tlsCert, err := tls.LoadX509KeyPair(config.ClientCert, config.ClientKey)
+		if err != nil {
+			return fmt.Errorf("unable to load key pair %#v, %#v: %v", config.ClientCert, config.ClientKey, err)
+		}
+		clientCert = append(clientCert, tlsCert)
+		tlsConfig.Certificates = clientCert
+	}
+	if config.SSLMode == 2 || config.SSLMode == 3 {
+		tlsConfig.InsecureSkipVerify = true
+	}
+	if !filepath.IsAbs(config.Host) && !config.DisableSNI {
+		tlsConfig.ServerName = config.Host
+	}
+	providerLog(logger.LevelInfo, "registering custom TLS config, root cert %#v, client cert %#v, client key %#v, disable SNI? %v",
+		config.RootCert, config.ClientCert, config.ClientKey, config.DisableSNI)
+	if err := mysql.RegisterTLSConfig("custom", tlsConfig); err != nil {
+		return fmt.Errorf("unable to register tls config: %v", err)
+	}
+	return nil
 }
 
 func (p *MySQLProvider) checkAvailability() error {
@@ -616,6 +644,14 @@ func (p *MySQLProvider) updateTaskTimestamp(name string) error {
 	return sqlCommonUpdateTaskTimestamp(name, p.dbHandle)
 }
 
+func (p *MySQLProvider) setFirstDownloadTimestamp(username string) error {
+	return sqlCommonSetFirstDownloadTimestamp(username, p.dbHandle)
+}
+
+func (p *MySQLProvider) setFirstUploadTimestamp(username string) error {
+	return sqlCommonSetFirstUploadTimestamp(username, p.dbHandle)
+}
+
 func (p *MySQLProvider) close() error {
 	return p.dbHandle.Close()
 }
@@ -651,21 +687,25 @@ func (p *MySQLProvider) migrateDatabase() error { //nolint:dupl
 		providerLog(logger.LevelDebug, "sql database is up to date, current version: %v", version)
 		return ErrNoInitRequired
 	case version < 19:
-		err = fmt.Errorf("database version %v is too old, please see the upgrading docs", version)
+		err = fmt.Errorf("database schema version %v is too old, please see the upgrading docs", version)
 		providerLog(logger.LevelError, "%v", err)
 		logger.ErrorToConsole("%v", err)
 		return err
 	case version == 19:
 		return updateMySQLDatabaseFromV19(p.dbHandle)
+	case version == 20:
+		return updateMySQLDatabaseFromV20(p.dbHandle)
+	case version == 21:
+		return updateMySQLDatabaseFromV21(p.dbHandle)
 	default:
 		if version > sqlDatabaseVersion {
-			providerLog(logger.LevelError, "database version %v is newer than the supported one: %v", version,
+			providerLog(logger.LevelError, "database schema version %v is newer than the supported one: %v", version,
 				sqlDatabaseVersion)
-			logger.WarnToConsole("database version %v is newer than the supported one: %v", version,
+			logger.WarnToConsole("database schema version %v is newer than the supported one: %v", version,
 				sqlDatabaseVersion)
 			return nil
 		}
-		return fmt.Errorf("database version not handled: %v", version)
+		return fmt.Errorf("database schema version not handled: %v", version)
 	}
 }
 
@@ -681,8 +721,12 @@ func (p *MySQLProvider) revertDatabase(targetVersion int) error {
 	switch dbVersion.Version {
 	case 20:
 		return downgradeMySQLDatabaseFromV20(p.dbHandle)
+	case 21:
+		return downgradeMySQLDatabaseFromV21(p.dbHandle)
+	case 22:
+		return downgradeMySQLDatabaseFromV22(p.dbHandle)
 	default:
-		return fmt.Errorf("database version not handled: %v", dbVersion.Version)
+		return fmt.Errorf("database schema version not handled: %v", dbVersion.Version)
 	}
 }
 
@@ -692,16 +736,44 @@ func (p *MySQLProvider) resetDatabase() error {
 }
 
 func updateMySQLDatabaseFromV19(dbHandle *sql.DB) error {
-	return updateMySQLDatabaseFrom19To20(dbHandle)
+	if err := updateMySQLDatabaseFrom19To20(dbHandle); err != nil {
+		return err
+	}
+	return updateMySQLDatabaseFromV20(dbHandle)
+}
+
+func updateMySQLDatabaseFromV20(dbHandle *sql.DB) error {
+	if err := updateMySQLDatabaseFrom20To21(dbHandle); err != nil {
+		return err
+	}
+	return updateMySQLDatabaseFromV21(dbHandle)
+}
+
+func updateMySQLDatabaseFromV21(dbHandle *sql.DB) error {
+	return updateMySQLDatabaseFrom21To22(dbHandle)
 }
 
 func downgradeMySQLDatabaseFromV20(dbHandle *sql.DB) error {
 	return downgradeMySQLDatabaseFrom20To19(dbHandle)
 }
 
+func downgradeMySQLDatabaseFromV21(dbHandle *sql.DB) error {
+	if err := downgradeMySQLDatabaseFrom21To20(dbHandle); err != nil {
+		return err
+	}
+	return downgradeMySQLDatabaseFromV20(dbHandle)
+}
+
+func downgradeMySQLDatabaseFromV22(dbHandle *sql.DB) error {
+	if err := downgradeMySQLDatabaseFrom22To21(dbHandle); err != nil {
+		return err
+	}
+	return downgradeMySQLDatabaseFromV21(dbHandle)
+}
+
 func updateMySQLDatabaseFrom19To20(dbHandle *sql.DB) error {
-	logger.InfoToConsole("updating database version: 19 -> 20")
-	providerLog(logger.LevelInfo, "updating database version: 19 -> 20")
+	logger.InfoToConsole("updating database schema version: 19 -> 20")
+	providerLog(logger.LevelInfo, "updating database schema version: 19 -> 20")
 	sql := strings.ReplaceAll(mysqlV20SQL, "{{events_actions}}", sqlTableEventsActions)
 	sql = strings.ReplaceAll(sql, "{{events_rules}}", sqlTableEventsRules)
 	sql = strings.ReplaceAll(sql, "{{rules_actions_mapping}}", sqlTableRulesActionsMapping)
@@ -711,13 +783,45 @@ func updateMySQLDatabaseFrom19To20(dbHandle *sql.DB) error {
 	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 20, true)
 }
 
+func updateMySQLDatabaseFrom20To21(dbHandle *sql.DB) error {
+	logger.InfoToConsole("updating database schema version: 20 -> 21")
+	providerLog(logger.LevelInfo, "updating database schema version: 20 -> 21")
+	sql := strings.ReplaceAll(mysqlV21SQL, "{{users}}", sqlTableUsers)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 21, true)
+}
+
+func updateMySQLDatabaseFrom21To22(dbHandle *sql.DB) error {
+	logger.InfoToConsole("updating database schema version: 21 -> 22")
+	providerLog(logger.LevelInfo, "updating database schema version: 21 -> 22")
+	sql := strings.ReplaceAll(mysqlV22SQL, "{{admins_groups_mapping}}", sqlTableAdminsGroupsMapping)
+	sql = strings.ReplaceAll(sql, "{{admins}}", sqlTableAdmins)
+	sql = strings.ReplaceAll(sql, "{{groups}}", sqlTableGroups)
+	sql = strings.ReplaceAll(sql, "{{prefix}}", config.SQLTablesPrefix)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 22, true)
+}
+
 func downgradeMySQLDatabaseFrom20To19(dbHandle *sql.DB) error {
-	logger.InfoToConsole("downgrading database version: 20 -> 19")
-	providerLog(logger.LevelInfo, "downgrading database version: 20 -> 19")
+	logger.InfoToConsole("downgrading database schema version: 20 -> 19")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 20 -> 19")
 	sql := strings.ReplaceAll(mysqlV20DownSQL, "{{events_actions}}", sqlTableEventsActions)
 	sql = strings.ReplaceAll(sql, "{{events_rules}}", sqlTableEventsRules)
 	sql = strings.ReplaceAll(sql, "{{rules_actions_mapping}}", sqlTableRulesActionsMapping)
 	sql = strings.ReplaceAll(sql, "{{users}}", sqlTableUsers)
 	sql = strings.ReplaceAll(sql, "{{tasks}}", sqlTableTasks)
 	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 19, false)
+}
+
+func downgradeMySQLDatabaseFrom21To20(dbHandle *sql.DB) error {
+	logger.InfoToConsole("downgrading database schema version: 21 -> 20")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 21 -> 20")
+	sql := strings.ReplaceAll(mysqlV21DownSQL, "{{users}}", sqlTableUsers)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 20, false)
+}
+
+func downgradeMySQLDatabaseFrom22To21(dbHandle *sql.DB) error {
+	logger.InfoToConsole("downgrading database schema version: 22 -> 21")
+	providerLog(logger.LevelInfo, "downgrading database schema version: 22 -> 21")
+	sql := strings.ReplaceAll(mysqlV22DownSQL, "{{admins_groups_mapping}}", sqlTableAdminsGroupsMapping)
+	sql = strings.ReplaceAll(sql, "{{prefix}}", config.SQLTablesPrefix)
+	return sqlCommonExecSQLAndUpdateDBVersion(dbHandle, strings.Split(sql, ";"), 21, false)
 }

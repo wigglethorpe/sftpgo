@@ -26,7 +26,7 @@ const (
 	selectUserFields = "id,username,password,public_keys,home_dir,uid,gid,max_sessions,quota_size,quota_files,permissions,used_quota_size," +
 		"used_quota_files,last_quota_update,upload_bandwidth,download_bandwidth,expiration_date,last_login,status,filters,filesystem," +
 		"additional_info,description,email,created_at,updated_at,upload_data_transfer,download_data_transfer,total_data_transfer," +
-		"used_upload_data_transfer,used_download_data_transfer,deleted_at"
+		"used_upload_data_transfer,used_download_data_transfer,deleted_at,first_download,first_upload"
 	selectFolderFields = "id,path,used_quota_size,used_quota_files,last_quota_update,name,description,filesystem"
 	selectAdminFields  = "id,username,password,status,email,permissions,filters,additional_info,description,created_at,updated_at,last_login"
 	selectAPIKeyFields = "key_id,name,api_key,scope,created_at,updated_at,last_use_at,expires_at,description,user_id,admin_id"
@@ -457,6 +457,16 @@ func getSetUpdateAtQuery() string {
 	return fmt.Sprintf(`UPDATE %s SET updated_at = %s WHERE username = %s`, sqlTableUsers, sqlPlaceholders[0], sqlPlaceholders[1])
 }
 
+func getSetFirstUploadQuery() string {
+	return fmt.Sprintf(`UPDATE %s SET first_upload = %s WHERE username = %s AND first_upload = 0`,
+		sqlTableUsers, sqlPlaceholders[0], sqlPlaceholders[1])
+}
+
+func getSetFirstDownloadQuery() string {
+	return fmt.Sprintf(`UPDATE %s SET first_download = %s WHERE username = %s AND first_download = 0`,
+		sqlTableUsers, sqlPlaceholders[0], sqlPlaceholders[1])
+}
+
 func getUpdateLastLoginQuery() string {
 	return fmt.Sprintf(`UPDATE %s SET last_login = %s WHERE username = %s`, sqlTableUsers, sqlPlaceholders[0], sqlPlaceholders[1])
 }
@@ -484,8 +494,8 @@ func getAddUserQuery() string {
 	return fmt.Sprintf(`INSERT INTO %s (username,password,public_keys,home_dir,uid,gid,max_sessions,quota_size,quota_files,permissions,
 		used_quota_size,used_quota_files,last_quota_update,upload_bandwidth,download_bandwidth,status,last_login,expiration_date,filters,
 		filesystem,additional_info,description,email,created_at,updated_at,upload_data_transfer,download_data_transfer,total_data_transfer,
-		used_upload_data_transfer,used_download_data_transfer,deleted_at)
-		VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0)`,
+		used_upload_data_transfer,used_download_data_transfer,deleted_at,first_download,first_upload)
+		VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,%s,%s,%s,0,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,0,0,0,0,0)`,
 		sqlTableUsers, sqlPlaceholders[0], sqlPlaceholders[1], sqlPlaceholders[2], sqlPlaceholders[3], sqlPlaceholders[4],
 		sqlPlaceholders[5], sqlPlaceholders[6], sqlPlaceholders[7], sqlPlaceholders[8], sqlPlaceholders[9],
 		sqlPlaceholders[10], sqlPlaceholders[11], sqlPlaceholders[12], sqlPlaceholders[13], sqlPlaceholders[14],
@@ -562,6 +572,18 @@ func getAddUserGroupMappingQuery() string {
 		sqlPlaceholders[1], sqlPlaceholders[2])
 }
 
+func getClearAdminGroupMappingQuery() string {
+	return fmt.Sprintf(`DELETE FROM %s WHERE admin_id = (SELECT id FROM %s WHERE username = %s)`, sqlTableAdminsGroupsMapping,
+		sqlTableAdmins, sqlPlaceholders[0])
+}
+
+func getAddAdminGroupMappingQuery() string {
+	return fmt.Sprintf(`INSERT INTO %s (admin_id,group_id,options) VALUES ((SELECT id FROM %s WHERE username = %s),
+		(SELECT id FROM %s WHERE name = %s),%s)`,
+		sqlTableAdminsGroupsMapping, sqlTableAdmins, sqlPlaceholders[0], getSQLQuotedName(sqlTableGroups),
+		sqlPlaceholders[1], sqlPlaceholders[2])
+}
+
 func getClearGroupFolderMappingQuery() string {
 	return fmt.Sprintf(`DELETE FROM %s WHERE group_id = (SELECT id FROM %s WHERE name = %s)`, sqlTableGroupsFoldersMapping,
 		getSQLQuotedName(sqlTableGroups), sqlPlaceholders[0])
@@ -626,6 +648,23 @@ func getRelatedGroupsForUsersQuery(users []User) string {
 	}
 	return fmt.Sprintf(`SELECT g.name,ug.group_type,ug.user_id FROM %s g INNER JOIN %s ug ON g.id = ug.group_id WHERE
 		ug.user_id IN %s ORDER BY ug.user_id`, getSQLQuotedName(sqlTableGroups), sqlTableUsersGroupsMapping, sb.String())
+}
+
+func getRelatedGroupsForAdminsQuery(admins []Admin) string {
+	var sb strings.Builder
+	for _, a := range admins {
+		if sb.Len() == 0 {
+			sb.WriteString("(")
+		} else {
+			sb.WriteString(",")
+		}
+		sb.WriteString(strconv.FormatInt(a.ID, 10))
+	}
+	if sb.Len() > 0 {
+		sb.WriteString(")")
+	}
+	return fmt.Sprintf(`SELECT g.name,ag.options,ag.admin_id FROM %s g INNER JOIN %s ag ON g.id = ag.group_id WHERE
+		ag.admin_id IN %s ORDER BY ag.admin_id`, getSQLQuotedName(sqlTableGroups), sqlTableAdminsGroupsMapping, sb.String())
 }
 
 func getRelatedFoldersForUsersQuery(users []User) string {
@@ -696,6 +735,23 @@ func getRelatedUsersForGroupsQuery(groups []Group) string {
 	}
 	return fmt.Sprintf(`SELECT um.group_id,u.username FROM %s um INNER JOIN %s u ON um.user_id = u.id
 		WHERE um.group_id IN %s ORDER BY um.group_id`, sqlTableUsersGroupsMapping, sqlTableUsers, sb.String())
+}
+
+func getRelatedAdminsForGroupsQuery(groups []Group) string {
+	var sb strings.Builder
+	for _, g := range groups {
+		if sb.Len() == 0 {
+			sb.WriteString("(")
+		} else {
+			sb.WriteString(",")
+		}
+		sb.WriteString(strconv.FormatInt(g.ID, 10))
+	}
+	if sb.Len() > 0 {
+		sb.WriteString(")")
+	}
+	return fmt.Sprintf(`SELECT am.group_id,a.username FROM %s am INNER JOIN %s a ON am.admin_id = a.id
+		WHERE am.group_id IN %s ORDER BY am.group_id`, sqlTableAdminsGroupsMapping, sqlTableAdmins, sb.String())
 }
 
 func getRelatedFoldersForGroupsQuery(groups []Group) string {

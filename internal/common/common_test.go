@@ -21,11 +21,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"runtime"
 	"strings"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -499,14 +497,14 @@ func TestIdleConnections(t *testing.T) {
 		},
 	}
 	c := NewBaseConnection(sshConn1.id+"_1", ProtocolSFTP, "", "", user)
-	c.lastActivity = time.Now().Add(-24 * time.Hour).UnixNano()
+	c.lastActivity.Store(time.Now().Add(-24 * time.Hour).UnixNano())
 	fakeConn := &fakeConnection{
 		BaseConnection: c,
 	}
 	// both ssh connections are expired but they should get removed only
 	// if there is no associated connection
-	sshConn1.lastActivity = c.lastActivity
-	sshConn2.lastActivity = c.lastActivity
+	sshConn1.lastActivity.Store(c.lastActivity.Load())
+	sshConn2.lastActivity.Store(c.lastActivity.Load())
 	Connections.AddSSHConnection(sshConn1)
 	err = Connections.Add(fakeConn)
 	assert.NoError(t, err)
@@ -521,7 +519,7 @@ func TestIdleConnections(t *testing.T) {
 	assert.Equal(t, Connections.GetActiveSessions(username), 2)
 
 	cFTP := NewBaseConnection("id2", ProtocolFTP, "", "", dataprovider.User{})
-	cFTP.lastActivity = time.Now().UnixNano()
+	cFTP.lastActivity.Store(time.Now().UnixNano())
 	fakeConn = &fakeConnection{
 		BaseConnection: cFTP,
 	}
@@ -533,27 +531,27 @@ func TestIdleConnections(t *testing.T) {
 	assert.Len(t, Connections.sshConnections, 2)
 	Connections.RUnlock()
 
-	startPeriodicTimeoutTicker(100 * time.Millisecond)
-	assert.Eventually(t, func() bool { return Connections.GetActiveSessions(username) == 1 }, 1*time.Second, 200*time.Millisecond)
+	startPeriodicChecks(100 * time.Millisecond)
+	assert.Eventually(t, func() bool { return Connections.GetActiveSessions(username) == 1 }, 2*time.Second, 200*time.Millisecond)
 	assert.Eventually(t, func() bool {
 		Connections.RLock()
 		defer Connections.RUnlock()
 		return len(Connections.sshConnections) == 1
 	}, 1*time.Second, 200*time.Millisecond)
-	stopPeriodicTimeoutTicker()
+	stopEventScheduler()
 	assert.Len(t, Connections.GetStats(), 2)
-	c.lastActivity = time.Now().Add(-24 * time.Hour).UnixNano()
-	cFTP.lastActivity = time.Now().Add(-24 * time.Hour).UnixNano()
-	sshConn2.lastActivity = c.lastActivity
-	startPeriodicTimeoutTicker(100 * time.Millisecond)
-	assert.Eventually(t, func() bool { return len(Connections.GetStats()) == 0 }, 1*time.Second, 200*time.Millisecond)
+	c.lastActivity.Store(time.Now().Add(-24 * time.Hour).UnixNano())
+	cFTP.lastActivity.Store(time.Now().Add(-24 * time.Hour).UnixNano())
+	sshConn2.lastActivity.Store(c.lastActivity.Load())
+	startPeriodicChecks(100 * time.Millisecond)
+	assert.Eventually(t, func() bool { return len(Connections.GetStats()) == 0 }, 2*time.Second, 200*time.Millisecond)
 	assert.Eventually(t, func() bool {
 		Connections.RLock()
 		defer Connections.RUnlock()
 		return len(Connections.sshConnections) == 0
 	}, 1*time.Second, 200*time.Millisecond)
 	assert.Equal(t, int32(0), Connections.GetClientConnections())
-	stopPeriodicTimeoutTicker()
+	stopEventScheduler()
 	assert.True(t, customConn1.isClosed)
 	assert.True(t, customConn2.isClosed)
 
@@ -647,9 +645,9 @@ func TestConnectionStatus(t *testing.T) {
 		BaseConnection: c1,
 	}
 	t1 := NewBaseTransfer(nil, c1, nil, "/p1", "/p1", "/r1", TransferUpload, 0, 0, 0, 0, true, fs, dataprovider.TransferQuota{})
-	t1.BytesReceived = 123
+	t1.BytesReceived.Store(123)
 	t2 := NewBaseTransfer(nil, c1, nil, "/p2", "/p2", "/r2", TransferDownload, 0, 0, 0, 0, true, fs, dataprovider.TransferQuota{})
-	t2.BytesSent = 456
+	t2.BytesSent.Store(456)
 	c2 := NewBaseConnection("id2", ProtocolSSH, "", "", user)
 	fakeConn2 := &fakeConnection{
 		BaseConnection: c2,
@@ -699,7 +697,7 @@ func TestConnectionStatus(t *testing.T) {
 
 	err = fakeConn3.SignalTransfersAbort()
 	assert.NoError(t, err)
-	assert.Equal(t, int32(1), atomic.LoadInt32(&t3.AbortTransfer))
+	assert.True(t, t3.AbortTransfer.Load())
 	err = t3.Close()
 	assert.NoError(t, err)
 	err = fakeConn3.SignalTransfersAbort()
@@ -717,6 +715,35 @@ func TestConnectionStatus(t *testing.T) {
 	Connections.Remove(fakeConn3.GetID())
 	stats = Connections.GetStats()
 	assert.Len(t, stats, 0)
+}
+
+func TestQuotaScans(t *testing.T) {
+	username := "username"
+	assert.True(t, QuotaScans.AddUserQuotaScan(username))
+	assert.False(t, QuotaScans.AddUserQuotaScan(username))
+	usersScans := QuotaScans.GetUsersQuotaScans()
+	if assert.Len(t, usersScans, 1) {
+		assert.Equal(t, usersScans[0].Username, username)
+		assert.Equal(t, QuotaScans.UserScans[0].StartTime, usersScans[0].StartTime)
+		QuotaScans.UserScans[0].StartTime = 0
+		assert.NotEqual(t, QuotaScans.UserScans[0].StartTime, usersScans[0].StartTime)
+	}
+
+	assert.True(t, QuotaScans.RemoveUserQuotaScan(username))
+	assert.False(t, QuotaScans.RemoveUserQuotaScan(username))
+	assert.Len(t, QuotaScans.GetUsersQuotaScans(), 0)
+	assert.Len(t, usersScans, 1)
+
+	folderName := "folder"
+	assert.True(t, QuotaScans.AddVFolderQuotaScan(folderName))
+	assert.False(t, QuotaScans.AddVFolderQuotaScan(folderName))
+	if assert.Len(t, QuotaScans.GetVFoldersQuotaScans(), 1) {
+		assert.Equal(t, QuotaScans.GetVFoldersQuotaScans()[0].Name, folderName)
+	}
+
+	assert.True(t, QuotaScans.RemoveVFolderQuotaScan(folderName))
+	assert.False(t, QuotaScans.RemoveVFolderQuotaScan(folderName))
+	assert.Len(t, QuotaScans.GetVFoldersQuotaScans(), 0)
 }
 
 func TestProxyProtocolVersion(t *testing.T) {
@@ -1033,108 +1060,172 @@ func TestUserRecentActivity(t *testing.T) {
 	assert.True(t, res)
 }
 
-func TestEventRuleMatch(t *testing.T) {
-	conditions := dataprovider.EventConditions{
-		ProviderEvents: []string{"add", "update"},
-		Options: dataprovider.ConditionOptions{
-			Names: []dataprovider.ConditionPattern{
-				{
-					Pattern:      "user1",
-					InverseMatch: true,
-				},
+func TestVfsSameResource(t *testing.T) {
+	fs := vfs.Filesystem{}
+	other := vfs.Filesystem{}
+	res := fs.IsSameResource(other)
+	assert.True(t, res)
+	fs = vfs.Filesystem{
+		Provider: sdk.S3FilesystemProvider,
+		S3Config: vfs.S3FsConfig{
+			BaseS3FsConfig: sdk.BaseS3FsConfig{
+				Bucket: "a",
+				Region: "b",
 			},
 		},
 	}
-	res := conditions.ProviderEventMatch(dataprovider.EventParams{
-		Name:  "user1",
-		Event: "add",
-	})
-	assert.False(t, res)
-	res = conditions.ProviderEventMatch(dataprovider.EventParams{
-		Name:  "user2",
-		Event: "update",
-	})
-	assert.True(t, res)
-	res = conditions.ProviderEventMatch(dataprovider.EventParams{
-		Name:  "user2",
-		Event: "delete",
-	})
-	assert.False(t, res)
-	conditions.Options.ProviderObjects = []string{"api_key"}
-	res = conditions.ProviderEventMatch(dataprovider.EventParams{
-		Name:       "user2",
-		Event:      "update",
-		ObjectType: "share",
-	})
-	assert.False(t, res)
-	res = conditions.ProviderEventMatch(dataprovider.EventParams{
-		Name:       "user2",
-		Event:      "update",
-		ObjectType: "api_key",
-	})
-	assert.True(t, res)
-	// now test fs events
-	conditions = dataprovider.EventConditions{
-		FsEvents: []string{operationUpload, operationDownload},
-		Options: dataprovider.ConditionOptions{
-			Names: []dataprovider.ConditionPattern{
-				{
-					Pattern: "user*",
-				},
-				{
-					Pattern: "tester*",
-				},
+	other = vfs.Filesystem{
+		Provider: sdk.S3FilesystemProvider,
+		S3Config: vfs.S3FsConfig{
+			BaseS3FsConfig: sdk.BaseS3FsConfig{
+				Bucket: "a",
+				Region: "c",
 			},
-			FsPaths: []dataprovider.ConditionPattern{
-				{
-					Pattern: "*.txt",
-				},
-			},
-			Protocols:   []string{ProtocolSFTP},
-			MinFileSize: 10,
-			MaxFileSize: 30,
 		},
 	}
-	params := dataprovider.EventParams{
-		Name:        "tester4",
-		Event:       operationDelete,
-		VirtualPath: "/path.txt",
-		Protocol:    ProtocolSFTP,
-		ObjectName:  "path.txt",
-		FileSize:    20,
+	res = fs.IsSameResource(other)
+	assert.False(t, res)
+	other = vfs.Filesystem{
+		Provider: sdk.S3FilesystemProvider,
+		S3Config: vfs.S3FsConfig{
+			BaseS3FsConfig: sdk.BaseS3FsConfig{
+				Bucket: "a",
+				Region: "b",
+			},
+		},
 	}
-	res = conditions.FsEventMatch(params)
-	assert.False(t, res)
-	params.Event = operationDownload
-	res = conditions.FsEventMatch(params)
+	res = fs.IsSameResource(other)
 	assert.True(t, res)
-	params.Name = "name"
-	res = conditions.FsEventMatch(params)
+	fs = vfs.Filesystem{
+		Provider: sdk.GCSFilesystemProvider,
+		GCSConfig: vfs.GCSFsConfig{
+			BaseGCSFsConfig: sdk.BaseGCSFsConfig{
+				Bucket: "b",
+			},
+		},
+	}
+	other = vfs.Filesystem{
+		Provider: sdk.GCSFilesystemProvider,
+		GCSConfig: vfs.GCSFsConfig{
+			BaseGCSFsConfig: sdk.BaseGCSFsConfig{
+				Bucket: "c",
+			},
+		},
+	}
+	res = fs.IsSameResource(other)
 	assert.False(t, res)
-	params.Name = "user5"
-	res = conditions.FsEventMatch(params)
+	other = vfs.Filesystem{
+		Provider: sdk.GCSFilesystemProvider,
+		GCSConfig: vfs.GCSFsConfig{
+			BaseGCSFsConfig: sdk.BaseGCSFsConfig{
+				Bucket: "b",
+			},
+		},
+	}
+	res = fs.IsSameResource(other)
 	assert.True(t, res)
-	params.VirtualPath = "/sub/f.jpg"
-	params.ObjectName = path.Base(params.VirtualPath)
-	res = conditions.FsEventMatch(params)
-	assert.False(t, res)
-	params.VirtualPath = "/sub/f.txt"
-	params.ObjectName = path.Base(params.VirtualPath)
-	res = conditions.FsEventMatch(params)
+	sasURL := kms.NewPlainSecret("http://127.0.0.1/sasurl")
+	fs = vfs.Filesystem{
+		Provider: sdk.AzureBlobFilesystemProvider,
+		AzBlobConfig: vfs.AzBlobFsConfig{
+			BaseAzBlobFsConfig: sdk.BaseAzBlobFsConfig{
+				AccountName: "a",
+			},
+			SASURL: sasURL,
+		},
+	}
+	err := fs.Validate("data1")
+	assert.NoError(t, err)
+	other = vfs.Filesystem{
+		Provider: sdk.AzureBlobFilesystemProvider,
+		AzBlobConfig: vfs.AzBlobFsConfig{
+			BaseAzBlobFsConfig: sdk.BaseAzBlobFsConfig{
+				AccountName: "a",
+			},
+			SASURL: sasURL,
+		},
+	}
+	err = other.Validate("data2")
+	assert.NoError(t, err)
+	err = fs.AzBlobConfig.SASURL.TryDecrypt()
+	assert.NoError(t, err)
+	err = other.AzBlobConfig.SASURL.TryDecrypt()
+	assert.NoError(t, err)
+	res = fs.IsSameResource(other)
 	assert.True(t, res)
-	params.Protocol = ProtocolHTTP
-	res = conditions.FsEventMatch(params)
+	fs.AzBlobConfig.AccountName = "b"
+	res = fs.IsSameResource(other)
 	assert.False(t, res)
-	params.Protocol = ProtocolSFTP
-	params.FileSize = 5
-	res = conditions.FsEventMatch(params)
+	fs.AzBlobConfig.AccountName = "a"
+	other.AzBlobConfig.SASURL = kms.NewPlainSecret("http://127.1.1.1/sasurl")
+	err = other.Validate("data2")
+	assert.NoError(t, err)
+	err = other.AzBlobConfig.SASURL.TryDecrypt()
+	assert.NoError(t, err)
+	res = fs.IsSameResource(other)
 	assert.False(t, res)
-	params.FileSize = 50
-	res = conditions.FsEventMatch(params)
-	assert.False(t, res)
-	params.FileSize = 25
-	res = conditions.FsEventMatch(params)
+	fs = vfs.Filesystem{
+		Provider: sdk.HTTPFilesystemProvider,
+		HTTPConfig: vfs.HTTPFsConfig{
+			BaseHTTPFsConfig: sdk.BaseHTTPFsConfig{
+				Endpoint: "http://127.0.0.1/httpfs",
+				Username: "a",
+			},
+		},
+	}
+	other = vfs.Filesystem{
+		Provider: sdk.HTTPFilesystemProvider,
+		HTTPConfig: vfs.HTTPFsConfig{
+			BaseHTTPFsConfig: sdk.BaseHTTPFsConfig{
+				Endpoint: "http://127.0.0.1/httpfs",
+				Username: "b",
+			},
+		},
+	}
+	res = fs.IsSameResource(other)
 	assert.True(t, res)
+	fs.HTTPConfig.EqualityCheckMode = 1
+	res = fs.IsSameResource(other)
+	assert.False(t, res)
+}
+
+func TestUpdateTransferTimestamps(t *testing.T) {
+	username := "user_test_timestamps"
+	user := &dataprovider.User{
+		BaseUser: sdk.BaseUser{
+			Username: username,
+			HomeDir:  filepath.Join(os.TempDir(), username),
+			Status:   1,
+			Permissions: map[string][]string{
+				"/": {dataprovider.PermAny},
+			},
+		},
+	}
+	err := dataprovider.AddUser(user, "", "")
+	assert.NoError(t, err)
+	assert.Equal(t, int64(0), user.FirstUpload)
+	assert.Equal(t, int64(0), user.FirstDownload)
+
+	err = dataprovider.UpdateUserTransferTimestamps(username, true)
+	assert.NoError(t, err)
+	userGet, err := dataprovider.UserExists(username)
+	assert.NoError(t, err)
+	assert.Greater(t, userGet.FirstUpload, int64(0))
+	assert.Equal(t, int64(0), user.FirstDownload)
+	err = dataprovider.UpdateUserTransferTimestamps(username, false)
+	assert.NoError(t, err)
+	userGet, err = dataprovider.UserExists(username)
+	assert.NoError(t, err)
+	assert.Greater(t, userGet.FirstUpload, int64(0))
+	assert.Greater(t, userGet.FirstDownload, int64(0))
+	// updating again must fail
+	err = dataprovider.UpdateUserTransferTimestamps(username, true)
+	assert.Error(t, err)
+	err = dataprovider.UpdateUserTransferTimestamps(username, false)
+	assert.Error(t, err)
+	// cleanup
+	err = dataprovider.DeleteUser(username, "", "")
+	assert.NoError(t, err)
 }
 
 func BenchmarkBcryptHashing(b *testing.B) {

@@ -12,11 +12,12 @@
 // You should have received a copy of the GNU Affero General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+// Package version defines SFTPGo version details
 package version
 
 import "strings"
 
-const version = "2.3.1-dev"
+const version = "2.3.5-dev"
 
 var (
 	commit = ""

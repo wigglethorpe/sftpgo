@@ -767,7 +767,7 @@ func TestRetentionInvalidTokenClaims(t *testing.T) {
 	user.Filters.AllowAPIKeyAuth = true
 	err := dataprovider.AddUser(&user, "", "")
 	assert.NoError(t, err)
-	folderRetention := []common.FolderRetention{
+	folderRetention := []dataprovider.FolderRetention{
 		{
 			Path:            "/",
 			Retention:       0,
@@ -1421,7 +1421,7 @@ func TestQuotaScanInvalidFs(t *testing.T) {
 			Provider: sdk.S3FilesystemProvider,
 		},
 	}
-	dataprovider.QuotaScans.AddUserQuotaScan(user.Username)
+	common.QuotaScans.AddUserQuotaScan(user.Username)
 	err := doUserQuotaScan(user)
 	assert.Error(t, err)
 }
@@ -1811,6 +1811,11 @@ func TestZipErrors(t *testing.T) {
 		assert.Contains(t, err.Error(), "write error")
 	}
 
+	err = addZipEntry(wr, connection, "/"+filepath.Base(testDir), path.Join("/", filepath.Base(testDir), "dir"))
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "is outside base dir")
+	}
+
 	testFilePath := filepath.Join(testDir, "ziptest.zip")
 	err = os.WriteFile(testFilePath, util.GenerateRandomBytes(65535), os.ModePerm)
 	assert.NoError(t, err)
@@ -2181,6 +2186,13 @@ func TestWebUserInvalidClaims(t *testing.T) {
 	req, _ = http.NewRequest(http.MethodGet, webClientEditFilePath, nil)
 	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
 	server.handleClientEditFile(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodGet, webClientSharePath, nil)
+	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
+	server.handleClientAddShareGet(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 
