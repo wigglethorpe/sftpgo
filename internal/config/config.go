@@ -24,6 +24,7 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+	"github.com/subosito/gotenv"
 
 	"github.com/drakkan/sftpgo/v2/internal/acme"
 	"github.com/drakkan/sftpgo/v2/internal/command"
@@ -100,6 +101,7 @@ var (
 		Port:                  8080,
 		EnableWebAdmin:        true,
 		EnableWebClient:       true,
+		EnableRESTAPI:         true,
 		EnabledLoginMethods:   0,
 		EnableHTTPS:           false,
 		CertificateFile:       "",
@@ -114,16 +116,17 @@ var (
 		RenderOpenAPI:         true,
 		WebClientIntegrations: nil,
 		OIDC: httpd.OIDC{
-			ClientID:        "",
-			ClientSecret:    "",
-			ConfigURL:       "",
-			RedirectBaseURL: "",
-			UsernameField:   "",
-			RoleField:       "",
-			ImplicitRoles:   false,
-			Scopes:          []string{"openid", "profile", "email"},
-			CustomFields:    []string{},
-			Debug:           false,
+			ClientID:                   "",
+			ClientSecret:               "",
+			ConfigURL:                  "",
+			RedirectBaseURL:            "",
+			UsernameField:              "",
+			RoleField:                  "",
+			ImplicitRoles:              false,
+			Scopes:                     []string{"openid", "profile", "email"},
+			CustomFields:               []string{},
+			InsecureSkipSignatureCheck: false,
+			Debug:                      false,
 		},
 		Security: httpd.SecurityConf{
 			Enabled:                 false,
@@ -207,6 +210,7 @@ func Init() {
 			MaxTotalConnections:   0,
 			MaxPerHostConnections: 20,
 			WhiteListFile:         "",
+			AllowSelfConnections:  0,
 			DefenderConfig: common.DefenderConfig{
 				Enabled:            false,
 				Driver:             common.DefenderDriverMemory,
@@ -309,22 +313,23 @@ func Init() {
 			},
 		},
 		ProviderConf: dataprovider.Config{
-			Driver:           "sqlite",
-			Name:             "sftpgo.db",
-			Host:             "",
-			Port:             0,
-			Username:         "",
-			Password:         "",
-			ConnectionString: "",
-			SQLTablesPrefix:  "",
-			SSLMode:          0,
-			DisableSNI:       false,
-			RootCert:         "",
-			ClientCert:       "",
-			ClientKey:        "",
-			TrackQuota:       2,
-			PoolSize:         0,
-			UsersBaseDir:     "",
+			Driver:             "sqlite",
+			Name:               "sftpgo.db",
+			Host:               "",
+			Port:               0,
+			Username:           "",
+			Password:           "",
+			ConnectionString:   "",
+			SQLTablesPrefix:    "",
+			SSLMode:            0,
+			DisableSNI:         false,
+			TargetSessionAttrs: "",
+			RootCert:           "",
+			ClientCert:         "",
+			ClientKey:          "",
+			TrackQuota:         2,
+			PoolSize:           0,
+			UsersBaseDir:       "",
 			Actions: dataprovider.ObjectsActions{
 				ExecuteOn:  []string{},
 				ExecuteFor: []string{},
@@ -362,7 +367,12 @@ func Init() {
 			CreateDefaultAdmin: false,
 			NamingRules:        1,
 			IsShared:           0,
-			BackupsPath:        "backups",
+			Node: dataprovider.NodeConfig{
+				Host:  "",
+				Port:  0,
+				Proto: "http",
+			},
+			BackupsPath: "backups",
 		},
 		HTTPDConfig: httpd.Conf{
 			Bindings:           []httpd.Binding{defaultHTTPDBinding},
@@ -418,7 +428,7 @@ func Init() {
 			},
 		},
 		MFAConfig: mfa.Config{
-			TOTP: nil,
+			TOTP: []mfa.TOTPConfig{defaultTOTP},
 		},
 		TelemetryConfig: telemetry.Conf{
 			BindPort:           0,
@@ -626,6 +636,64 @@ func setConfigFile(configDir, configFile string) {
 	viper.SetConfigFile(configFile)
 }
 
+// readEnvFiles reads files inside the "env.d" directory relative to configDir
+// and then export the valid variables into environment variables if they do
+// not exist
+func readEnvFiles(configDir string) {
+	envd := filepath.Join(configDir, "env.d")
+	entries, err := os.ReadDir(envd)
+	if err != nil {
+		logger.Info(logSender, "", "unable to read env files from %q: %v", envd, err)
+		return
+	}
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err == nil && info.Mode().IsRegular() {
+			envFile := filepath.Join(envd, entry.Name())
+			err = gotenv.Load(envFile)
+			if err != nil {
+				logger.Error(logSender, "", "unable to load env vars from file %q, err: %v", envFile, err)
+			} else {
+				logger.Info(logSender, "", "set env vars from file %q", envFile)
+			}
+		}
+	}
+}
+
+func checkOverrideDefaultSettings() {
+	// for slices we need to set the defaults to nil if the key is set in the config file,
+	// otherwise the values are merged and not replaced as expected
+	rateLimiters := viper.Get("common.rate_limiters")
+	if val, ok := rateLimiters.([]any); ok {
+		if len(val) > 0 {
+			if rl, ok := val[0].(map[string]any); ok {
+				if _, ok := rl["protocols"]; ok {
+					globalConf.Common.RateLimitersConfig[0].Protocols = nil
+				}
+			}
+		}
+	}
+
+	httpdBindings := viper.Get("httpd.bindings")
+	if val, ok := httpdBindings.([]any); ok {
+		if len(val) > 0 {
+			if binding, ok := val[0].(map[string]any); ok {
+				if val, ok := binding["oidc"]; ok {
+					if oidc, ok := val.(map[string]any); ok {
+						if _, ok := oidc["scopes"]; ok {
+							globalConf.HTTPDConfig.Bindings[0].OIDC.Scopes = nil
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if util.Contains(viper.AllKeys(), "mfa.totp") {
+		globalConf.MFAConfig.TOTP = nil
+	}
+}
+
 // LoadConfig loads the configuration
 // configDir will be added to the configuration search paths.
 // The search path contains by default the current directory and on linux it contains
@@ -633,6 +701,7 @@ func setConfigFile(configDir, configFile string) {
 // configFile is an absolute or relative path (to the config dir) to the configuration file.
 func LoadConfig(configDir, configFile string) error {
 	var err error
+	readEnvFiles(configDir)
 	viper.AddConfigPath(configDir)
 	setViperAdditionalConfigPaths()
 	viper.AddConfigPath(".")
@@ -648,8 +717,8 @@ func LoadConfig(configDir, configFile string) error {
 			logger.Warn(logSender, "", "error loading configuration file: %v", err)
 			logger.WarnToConsole("error loading configuration file: %v", err)
 		}
-		globalConf.MFAConfig.TOTP = []mfa.TOTPConfig{defaultTOTP}
 	}
+	checkOverrideDefaultSettings()
 	err = viper.Unmarshal(&globalConf)
 	if err != nil {
 		logger.Warn(logSender, "", "error parsing configuration file: %v", err)
@@ -1452,6 +1521,12 @@ func getHTTPDOIDCFromEnv(idx int) (httpd.OIDC, bool) {
 		isSet = true
 	}
 
+	skipSignatureCheck, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__OIDC__INSECURE_SKIP_SIGNATURE_CHECK", idx))
+	if ok {
+		result.InsecureSkipSignatureCheck = skipSignatureCheck
+		isSet = true
+	}
+
 	debug, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__OIDC__DEBUG", idx))
 	if ok {
 		result.Debug = debug
@@ -1685,6 +1760,12 @@ func getHTTPDBindingFromEnv(idx int) { //nolint:gocyclo
 		isSet = true
 	}
 
+	enableRESTAPI, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__ENABLE_REST_API", idx))
+	if ok {
+		binding.EnableRESTAPI = enableRESTAPI
+		isSet = true
+	}
+
 	enabledLoginMethods, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__ENABLED_LOGIN_METHODS", idx))
 	if ok {
 		binding.EnabledLoginMethods = int(enabledLoginMethods)
@@ -1849,6 +1930,7 @@ func setViperDefaults() {
 	viper.SetDefault("common.max_total_connections", globalConf.Common.MaxTotalConnections)
 	viper.SetDefault("common.max_per_host_connections", globalConf.Common.MaxPerHostConnections)
 	viper.SetDefault("common.whitelist_file", globalConf.Common.WhiteListFile)
+	viper.SetDefault("common.allow_self_connections", globalConf.Common.AllowSelfConnections)
 	viper.SetDefault("common.defender.enabled", globalConf.Common.DefenderConfig.Enabled)
 	viper.SetDefault("common.defender.driver", globalConf.Common.DefenderConfig.Driver)
 	viper.SetDefault("common.defender.ban_time", globalConf.Common.DefenderConfig.BanTime)
@@ -1929,6 +2011,7 @@ func setViperDefaults() {
 	viper.SetDefault("data_provider.password", globalConf.ProviderConf.Password)
 	viper.SetDefault("data_provider.sslmode", globalConf.ProviderConf.SSLMode)
 	viper.SetDefault("data_provider.disable_sni", globalConf.ProviderConf.DisableSNI)
+	viper.SetDefault("data_provider.target_session_attrs", globalConf.ProviderConf.TargetSessionAttrs)
 	viper.SetDefault("data_provider.root_cert", globalConf.ProviderConf.RootCert)
 	viper.SetDefault("data_provider.client_cert", globalConf.ProviderConf.ClientCert)
 	viper.SetDefault("data_provider.client_key", globalConf.ProviderConf.ClientKey)
@@ -1960,6 +2043,9 @@ func setViperDefaults() {
 	viper.SetDefault("data_provider.create_default_admin", globalConf.ProviderConf.CreateDefaultAdmin)
 	viper.SetDefault("data_provider.naming_rules", globalConf.ProviderConf.NamingRules)
 	viper.SetDefault("data_provider.is_shared", globalConf.ProviderConf.IsShared)
+	viper.SetDefault("data_provider.node.host", globalConf.ProviderConf.Node.Host)
+	viper.SetDefault("data_provider.node.port", globalConf.ProviderConf.Node.Port)
+	viper.SetDefault("data_provider.node.proto", globalConf.ProviderConf.Node.Proto)
 	viper.SetDefault("data_provider.backups_path", globalConf.ProviderConf.BackupsPath)
 	viper.SetDefault("httpd.templates_path", globalConf.HTTPDConfig.TemplatesPath)
 	viper.SetDefault("httpd.static_files_path", globalConf.HTTPDConfig.StaticFilesPath)

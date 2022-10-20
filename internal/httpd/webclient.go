@@ -36,6 +36,7 @@ import (
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
+	"github.com/drakkan/sftpgo/v2/internal/logger"
 	"github.com/drakkan/sftpgo/v2/internal/mfa"
 	"github.com/drakkan/sftpgo/v2/internal/smtp"
 	"github.com/drakkan/sftpgo/v2/internal/util"
@@ -403,16 +404,17 @@ func renderClientTemplate(w http.ResponseWriter, tmplName string, data any) {
 }
 
 func (s *httpdServer) renderClientMessagePage(w http.ResponseWriter, r *http.Request, title, body string, statusCode int, err error, message string) {
-	var errorString string
+	var errorString strings.Builder
 	if body != "" {
-		errorString = body + " "
+		errorString.WriteString(body)
+		errorString.WriteString(" ")
 	}
 	if err != nil {
-		errorString += err.Error()
+		errorString.WriteString(err.Error())
 	}
 	data := clientMessagePage{
 		baseClientPage: s.getBaseClientPageData(title, "", r),
-		Error:          errorString,
+		Error:          errorString.String(),
 		Success:        message,
 	}
 	w.WriteHeader(statusCode)
@@ -541,7 +543,7 @@ func (s *httpdServer) renderSharedFilesPage(w http.ResponseWriter, r *http.Reque
 		CurrentDir:     url.QueryEscape(dirName),
 		DirsURL:        path.Join(webClientPubSharesPath, share.ShareID, "dirs"),
 		FilesURL:       currentURL,
-		DownloadURL:    path.Join(webClientPubSharesPath, share.ShareID),
+		DownloadURL:    path.Join(webClientPubSharesPath, share.ShareID, "partial"),
 		UploadBaseURL:  path.Join(webClientPubSharesPath, share.ShareID, url.PathEscape(dirName)),
 		Error:          error,
 		Paths:          getDirMapping(dirName, currentURL),
@@ -656,6 +658,49 @@ func (s *httpdServer) handleWebClientDownloadZip(w http.ResponseWriter, r *http.
 	renderCompressedFiles(w, connection, name, filesList, nil)
 }
 
+func (s *httpdServer) handleClientSharePartialDownload(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	validScopes := []dataprovider.ShareScope{dataprovider.ShareScopeRead, dataprovider.ShareScopeReadWrite}
+	share, connection, err := s.checkPublicShare(w, r, validScopes, true)
+	if err != nil {
+		return
+	}
+	if err := validateBrowsableShare(share, connection); err != nil {
+		s.renderClientMessagePage(w, r, "Unable to validate share", "", getRespStatus(err), err, "")
+		return
+	}
+	name, err := getBrowsableSharedPath(share, r)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Invalid share path", "", getRespStatus(err), err, "")
+		return
+	}
+	if err = common.Connections.Add(connection); err != nil {
+		s.renderClientMessagePage(w, r, "Unable to add connection", "", http.StatusTooManyRequests, err, "")
+		return
+	}
+	defer common.Connections.Remove(connection.GetID())
+
+	transferQuota := connection.GetTransferQuota()
+	if !transferQuota.HasDownloadSpace() {
+		err = connection.GetReadQuotaExceededError()
+		connection.Log(logger.LevelInfo, "denying share read due to quota limits")
+		s.renderClientMessagePage(w, r, "Denying share read due to quota limits", "", getMappedStatusCode(err), err, "")
+		return
+	}
+	files := r.URL.Query().Get("files")
+	var filesList []string
+	err = json.Unmarshal([]byte(files), &filesList)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Unable to get files list", "", http.StatusInternalServerError, err, "")
+		return
+	}
+
+	dataprovider.UpdateShareLastUse(&share, 1) //nolint:errcheck
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"",
+		getCompressedFileName(fmt.Sprintf("share-%s", share.Name), filesList)))
+	renderCompressedFiles(w, connection, name, filesList, &share)
+}
+
 func (s *httpdServer) handleShareGetDirContents(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
 	validScopes := []dataprovider.ShareScope{dataprovider.ShareScopeRead, dataprovider.ShareScopeReadWrite}
@@ -696,6 +741,7 @@ func (s *httpdServer) handleShareGetDirContents(w http.ResponseWriter, r *http.R
 			res["type"] = "2"
 			res["size"] = util.ByteCountIEC(info.Size())
 		}
+		res["meta"] = fmt.Sprintf("%v_%v", res["type"], info.Name())
 		res["name"] = info.Name()
 		res["url"] = getFileObjectURL(share.GetRelativePath(name), info.Name(),
 			path.Join(webClientPubSharesPath, share.ShareID, "browse"))
@@ -757,9 +803,8 @@ func (s *httpdServer) handleShareGetFiles(w http.ResponseWriter, r *http.Request
 		s.renderSharedFilesPage(w, r, share.GetRelativePath(name), "", share)
 		return
 	}
-	inline := r.URL.Query().Get("inline") != ""
 	dataprovider.UpdateShareLastUse(&share, 1) //nolint:errcheck
-	if status, err := downloadFile(w, r, connection, name, info, inline, &share); err != nil {
+	if status, err := downloadFile(w, r, connection, name, info, false, &share); err != nil {
 		dataprovider.UpdateShareLastUse(&share, -1) //nolint:errcheck
 		if status > 0 {
 			s.renderSharedFilesPage(w, r, path.Dir(share.GetRelativePath(name)), err.Error(), share)
@@ -892,8 +937,7 @@ func (s *httpdServer) handleClientGetFiles(w http.ResponseWriter, r *http.Reques
 		s.renderFilesPage(w, r, name, "", user, len(s.binding.WebClientIntegrations) > 0)
 		return
 	}
-	inline := r.URL.Query().Get("inline") != ""
-	if status, err := downloadFile(w, r, connection, name, info, inline, nil); err != nil && status != 0 {
+	if status, err := downloadFile(w, r, connection, name, info, false, nil); err != nil && status != 0 {
 		if status > 0 {
 			if status == http.StatusRequestedRangeNotSatisfiable {
 				s.renderClientMessagePage(w, r, http.StatusText(status), "", status, err, "")
@@ -1304,9 +1348,80 @@ func (s *httpdServer) handleClientViewPDF(w http.ResponseWriter, r *http.Request
 	name = util.CleanPath(name)
 	data := viewPDFPage{
 		Title:     path.Base(name),
-		URL:       fmt.Sprintf("%v?path=%v&inline=1", webClientFilesPath, url.QueryEscape(name)),
+		URL:       fmt.Sprintf("%s?path=%s&_=%d", webClientGetPDFPath, url.QueryEscape(name), time.Now().UTC().Unix()),
 		StaticURL: webStaticFilesPath,
 		Branding:  s.binding.Branding.WebClient,
 	}
 	renderClientTemplate(w, templateClientViewPDF, data)
+}
+
+func (s *httpdServer) handleClientGetPDF(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodySize)
+	claims, err := getTokenClaims(r)
+	if err != nil || claims.Username == "" {
+		s.renderClientForbiddenPage(w, r, "Invalid token claims")
+		return
+	}
+	name := r.URL.Query().Get("path")
+	if name == "" {
+		s.renderClientBadRequestPage(w, r, errors.New("no file specified"))
+		return
+	}
+	name = util.CleanPath(name)
+	user, err := dataprovider.GetUserWithGroupSettings(claims.Username)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Unable to retrieve your user", "", getRespStatus(err), nil, "")
+		return
+	}
+
+	connID := xid.New().String()
+	protocol := getProtocolFromRequest(r)
+	connectionID := fmt.Sprintf("%v_%v", protocol, connID)
+	if err := checkHTTPClientUser(&user, r, connectionID, false); err != nil {
+		s.renderClientForbiddenPage(w, r, err.Error())
+		return
+	}
+	connection := &Connection{
+		BaseConnection: common.NewBaseConnection(connID, protocol, util.GetHTTPLocalAddress(r),
+			r.RemoteAddr, user),
+		request: r,
+	}
+	if err = common.Connections.Add(connection); err != nil {
+		s.renderClientMessagePage(w, r, "Unable to add connection", "", http.StatusTooManyRequests, err, "")
+		return
+	}
+	defer common.Connections.Remove(connection.GetID())
+
+	info, err := connection.Stat(name, 0)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Unable to get file", "", getRespStatus(err), err, "")
+		return
+	}
+	if info.IsDir() {
+		s.renderClientMessagePage(w, r, "Invalid file", fmt.Sprintf("%q is not a file", name),
+			http.StatusBadRequest, nil, "")
+		return
+	}
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
+	reader, err := connection.getFileReader(name, 0, r.Method)
+	if err != nil {
+		s.renderClientMessagePage(w, r, fmt.Sprintf("Unable to get a reader for the file %q", name), "",
+			getRespStatus(err), err, "")
+		return
+	}
+	defer reader.Close()
+
+	var b bytes.Buffer
+	_, err = io.CopyN(&b, reader, 128)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Invalid PDF file", fmt.Sprintf("Unable to validate the file %q as PDF", name),
+			http.StatusBadRequest, nil, "")
+		return
+	}
+	if ctype := http.DetectContentType(b.Bytes()); ctype != "application/pdf" {
+		connection.Log(logger.LevelDebug, "detected %q content type, expected PDF, file %q", ctype, name)
+		s.renderClientBadRequestPage(w, r, fmt.Errorf("the file %q does not look like a PDF", name))
+		return
+	}
+	downloadFile(w, r, connection, name, info, true, nil) //nolint:errcheck
 }

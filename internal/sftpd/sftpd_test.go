@@ -45,7 +45,7 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -189,6 +189,7 @@ func TestMain(m *testing.M) {
 	}
 	os.Setenv("SFTPGO_COMMON__UPLOAD_MODE", "2")
 	os.Setenv("SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN", "1")
+	os.Setenv("SFTPGO_COMMON__ALLOW_SELF_CONNECTIONS", "1")
 	os.Setenv("SFTPGO_DEFAULT_ADMIN_USERNAME", "admin")
 	os.Setenv("SFTPGO_DEFAULT_ADMIN_PASSWORD", "password")
 	err = config.LoadConfig(configDir, "")
@@ -607,7 +608,7 @@ func TestBasicSFTPFsHandling(t *testing.T) {
 		err = client.Mkdir(linkDir)
 		assert.NoError(t, err)
 		linkToLinkPath := path.Join(linkDir, testLinkToLinkName)
-		err = client.Symlink(testLinkName, linkToLinkPath)
+		err = client.Symlink(path.Join("/", testLinkName), linkToLinkPath)
 		assert.NoError(t, err)
 		info, err = client.Lstat(linkToLinkPath)
 		if assert.NoError(t, err) {
@@ -732,6 +733,8 @@ func TestSFTPFsEscapeHomeDir(t *testing.T) {
 		assert.NoError(t, err)
 		// linkName points to a link inside the home dir and this link points to a dir outside the home dir
 		_, err = client.ReadLink(linkName)
+		assert.ErrorIs(t, err, os.ErrPermission)
+		_, err = client.RealPath(linkName)
 		assert.ErrorIs(t, err, os.ErrPermission)
 		_, err = client.ReadDir(linkName)
 		assert.ErrorIs(t, err, os.ErrPermission)
@@ -1233,7 +1236,7 @@ func TestRealPath(t *testing.T) {
 			err = client.Mkdir(subdir)
 			assert.NoError(t, err)
 			linkName := testFileName + "_link"
-			err = client.Symlink(testFileName, path.Join(subdir, linkName))
+			err = client.Symlink(path.Join("/", testFileName), path.Join(subdir, linkName))
 			assert.NoError(t, err)
 			p, err = client.RealPath(path.Join(subdir, linkName))
 			assert.NoError(t, err)
@@ -6890,13 +6893,13 @@ func TestVirtualFoldersLink(t *testing.T) {
 		assert.NoError(t, err)
 		err = client.Symlink(path.Join(vdirPath2, testFileName), path.Join(vdirPath2, testDir, testFileName+".link"))
 		assert.NoError(t, err)
-		err = client.Symlink(testFileName, path.Join(vdirPath1, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath1, testFileName+".link1"))
 		assert.Error(t, err)
-		err = client.Symlink(testFileName, path.Join(vdirPath1, testDir, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath1, testDir, testFileName+".link1"))
 		assert.Error(t, err)
-		err = client.Symlink(testFileName, path.Join(vdirPath2, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath2, testFileName+".link1"))
 		assert.Error(t, err)
-		err = client.Symlink(testFileName, path.Join(vdirPath2, testDir, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath2, testDir, testFileName+".link1"))
 		assert.Error(t, err)
 		err = client.Symlink(path.Join(vdirPath1, testFileName), testFileName+".link1")
 		assert.Error(t, err)
@@ -7231,6 +7234,7 @@ func TestHashedPasswords(t *testing.T) {
 	pwdMapping["$1$b5caebda$VODr/nyhGWgZaY8sJ4x05."] = plainPwd
 	pwdMapping["$2a$14$ajq8Q7fbtFRQvXpdCq7Jcuy.Rx1h/L4J60Otx.gyNLbAYctGMJ9tK"] = "secret"
 	pwdMapping["$6$459ead56b72e44bc$uog86fUxscjt28BZxqFBE2pp2QD8P/1e98MNF75Z9xJfQvOckZnQ/1YJqiq1XeytPuDieHZvDAMoP7352ELkO1"] = "secret"
+	pwdMapping["$5$h4Aalt0fJdGX8sgv$Rd2ew0fvgzUN.DzAVlKa9QL4q/DZWo4SsKpB9.3AyZ/"] = plainPwd
 	pwdMapping["$apr1$OBWLeSme$WoJbB736e7kKxMBIAqilb1"] = plainPwd
 	pwdMapping["{MD5}5f4dcc3b5aa765d61d8327deb882cf99"] = plainPwd
 
@@ -7354,7 +7358,7 @@ func TestPermList(t *testing.T) {
 		}
 		err = client.Mkdir("sub")
 		assert.NoError(t, err)
-		err = client.Symlink(testFileName, path.Join("/sub", testFileName))
+		err = client.Symlink(path.Join("/", testFileName), path.Join("/sub", testFileName))
 		assert.NoError(t, err)
 		_, err = client.ReadLink(path.Join("/sub", testFileName))
 		assert.Error(t, err, "read remote link without permission on targe dir should not succeed")

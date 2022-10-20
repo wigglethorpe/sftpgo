@@ -51,6 +51,7 @@ import (
 	"github.com/GehirnInc/crypt"
 	"github.com/GehirnInc/crypt/apr1_crypt"
 	"github.com/GehirnInc/crypt/md5_crypt"
+	"github.com/GehirnInc/crypt/sha256_crypt"
 	"github.com/GehirnInc/crypt/sha512_crypt"
 	"github.com/alexedwards/argon2id"
 	"github.com/go-chi/render"
@@ -96,6 +97,7 @@ const (
 	pbkdf2SHA256B64SaltPrefix = "$pbkdf2-b64salt-sha256$"
 	md5cryptPwdPrefix         = "$1$"
 	md5cryptApr1PwdPrefix     = "$apr1$"
+	sha256cryptPwdPrefix      = "$5$"
 	sha512cryptPwdPrefix      = "$6$"
 	md5LDAPPwdPrefix          = "{MD5}"
 	trackQuotaDisabledError   = "please enable track_quota in your configuration to use this method"
@@ -163,10 +165,10 @@ var (
 	internalHashPwdPrefixes  = []string{argonPwdPrefix, bcryptPwdPrefix}
 	hashPwdPrefixes          = []string{argonPwdPrefix, bcryptPwdPrefix, pbkdf2SHA1Prefix, pbkdf2SHA256Prefix,
 		pbkdf2SHA512Prefix, pbkdf2SHA256B64SaltPrefix, md5cryptPwdPrefix, md5cryptApr1PwdPrefix, md5LDAPPwdPrefix,
-		sha512cryptPwdPrefix}
+		sha256cryptPwdPrefix, sha512cryptPwdPrefix}
 	pbkdfPwdPrefixes             = []string{pbkdf2SHA1Prefix, pbkdf2SHA256Prefix, pbkdf2SHA512Prefix, pbkdf2SHA256B64SaltPrefix}
 	pbkdfPwdB64SaltPrefixes      = []string{pbkdf2SHA256B64SaltPrefix}
-	unixPwdPrefixes              = []string{md5cryptPwdPrefix, md5cryptApr1PwdPrefix, sha512cryptPwdPrefix}
+	unixPwdPrefixes              = []string{md5cryptPwdPrefix, md5cryptApr1PwdPrefix, sha256cryptPwdPrefix, sha512cryptPwdPrefix}
 	sharedProviders              = []string{PGSQLDataProviderName, MySQLDataProviderName, CockroachDataProviderName}
 	logSender                    = "dataprovider"
 	sqlTableUsers                string
@@ -187,11 +189,13 @@ var (
 	sqlTableEventsRules          string
 	sqlTableRulesActionsMapping  string
 	sqlTableTasks                string
+	sqlTableNodes                string
 	sqlTableSchemaVersion        string
 	argon2Params                 *argon2id.Params
 	lastLoginMinDelay            = 10 * time.Minute
 	usernameRegex                = regexp.MustCompile("^[a-zA-Z0-9-_.~]+$")
 	tempPath                     string
+	allowSelfConnections         int
 	fnReloadRules                FnReloadRules
 	fnRemoveRule                 FnRemoveRule
 	fnHandleRuleForProviderEvent FnHandleRuleForProviderEvent
@@ -216,6 +220,7 @@ func initSQLTables() {
 	sqlTableEventsRules = "events_rules"
 	sqlTableRulesActionsMapping = "rules_actions_mapping"
 	sqlTableTasks = "tasks"
+	sqlTableNodes = "nodes"
 	sqlTableSchemaVersion = "schema_version"
 }
 
@@ -311,14 +316,14 @@ type ProviderStatus struct {
 	Error    string `json:"error"`
 }
 
-// Config provider configuration
+// Config defines the provider configuration
 type Config struct {
 	// Driver name, must be one of the SupportedProviders
 	Driver string `json:"driver" mapstructure:"driver"`
 	// Database name. For driver sqlite this can be the database name relative to the config dir
 	// or the absolute path to the SQLite database.
 	Name string `json:"name" mapstructure:"name"`
-	// Database host
+	// Database host. For postgresql and cockroachdb driver you can specify multiple hosts separated by commas
 	Host string `json:"host" mapstructure:"host"`
 	// Database port
 	Port int `json:"port" mapstructure:"port"`
@@ -332,8 +337,13 @@ type Config struct {
 	// 2 set ssl mode to verify-ca for driver postgresql and skip-verify for driver mysql.
 	// 3 set ssl mode to verify-full for driver postgresql and preferred for driver mysql.
 	SSLMode int `json:"sslmode" mapstructure:"sslmode"`
-	// Used for drivers mysql and postgresql. Set to true to disable SNI
+	// Used for drivers mysql, postgresql and cockroachdb. Set to true to disable SNI
 	DisableSNI bool `json:"disable_sni" mapstructure:"disable_sni"`
+	// TargetSessionAttrs is a postgresql and cockroachdb specific option.
+	// It determines whether the session must have certain properties to be acceptable.
+	// It's typically used in combination with multiple host names to select the first
+	// acceptable alternative among several hosts
+	TargetSessionAttrs string `json:"target_session_attrs" mapstructure:"target_session_attrs"`
 	// Path to the root certificate authority used to verify that the server certificate was signed by a trusted CA
 	RootCert string `json:"root_cert" mapstructure:"root_cert"`
 	// Path to the client certificate for two-way TLS authentication
@@ -460,6 +470,9 @@ type Config struct {
 	// For shared data providers, active transfers are persisted in the database and thus
 	// quota checks between ongoing transfers will work cross multiple instances
 	IsShared int `json:"is_shared" mapstructure:"is_shared"`
+	// Node defines the configuration for this cluster node.
+	// Ignored if the provider is not shared/shareable
+	Node NodeConfig `json:"node" mapstructure:"node"`
 	// Path to the backup directory. This can be an absolute path or a path relative to the config dir
 	BackupsPath string `json:"backups_path" mapstructure:"backups_path"`
 }
@@ -778,6 +791,11 @@ type Provider interface {
 	updateTaskTimestamp(name string) error
 	setFirstDownloadTimestamp(username string) error
 	setFirstUploadTimestamp(username string) error
+	addNode() error
+	getNodeByName(name string) (Node, error)
+	getNodes() ([]Node, error)
+	updateNodeTimestamp() error
+	cleanupNodes() error
 	checkAvailability() error
 	close() error
 	reloadConfig() error
@@ -785,6 +803,11 @@ type Provider interface {
 	migrateDatabase() error
 	revertDatabase(targetVersion int) error
 	resetDatabase() error
+}
+
+// SetAllowSelfConnections sets the desired behaviour for self connections
+func SetAllowSelfConnections(value int) {
+	allowSelfConnections = value
 }
 
 // SetTempPath sets the path for temporary files
@@ -801,7 +824,6 @@ func checkSharedMode() {
 // Initialize the data provider.
 // An error is returned if the configured driver is invalid or if the data provider cannot be initialized
 func Initialize(cnf Config, basePath string, checkAdmins bool) error {
-	var err error
 	config = cnf
 	checkSharedMode()
 	config.Actions.ExecuteOn = util.RemoveDuplicates(config.Actions.ExecuteOn, true)
@@ -812,19 +834,33 @@ func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 		return fmt.Errorf("required directory is invalid, backup path %#v", cnf.BackupsPath)
 	}
 
-	if err = initializeHashingAlgo(&cnf); err != nil {
+	if err := initializeHashingAlgo(&cnf); err != nil {
 		return err
 	}
-
-	if err = validateHooks(); err != nil {
+	if err := validateHooks(); err != nil {
 		return err
 	}
-	err = createProvider(basePath)
+	if err := createProvider(basePath); err != nil {
+		return err
+	}
+	if err := checkDatabase(checkAdmins); err != nil {
+		return err
+	}
+	admins, err := provider.getAdmins(1, 0, OrderASC)
 	if err != nil {
 		return err
 	}
-	if cnf.UpdateMode == 0 {
-		err = provider.initializeDatabase()
+	isAdminCreated.Store(len(admins) > 0)
+	if err := config.Node.validate(); err != nil {
+		return err
+	}
+	delayedQuotaUpdater.start()
+	return startScheduler()
+}
+
+func checkDatabase(checkAdmins bool) error {
+	if config.UpdateMode == 0 {
+		err := provider.initializeDatabase()
 		if err != nil && err != ErrNoInitRequired {
 			logger.WarnToConsole("Unable to initialize data provider: %v", err)
 			providerLog(logger.LevelError, "Unable to initialize data provider: %v", err)
@@ -838,7 +874,7 @@ func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 			providerLog(logger.LevelError, "database migration error: %v", err)
 			return err
 		}
-		if checkAdmins && cnf.CreateDefaultAdmin {
+		if checkAdmins && config.CreateDefaultAdmin {
 			err = checkDefaultAdmin()
 			if err != nil {
 				providerLog(logger.LevelError, "erro checking the default admin: %v", err)
@@ -848,13 +884,7 @@ func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 	} else {
 		providerLog(logger.LevelInfo, "database initialization/migration skipped, manual mode is configured")
 	}
-	admins, err := provider.getAdmins(1, 0, OrderASC)
-	if err != nil {
-		return err
-	}
-	isAdminCreated.Store(len(admins) > 0)
-	delayedQuotaUpdater.start()
-	return startScheduler()
+	return nil
 }
 
 func validateHooks() error {
@@ -937,15 +967,17 @@ func validateSQLTablesPrefix() error {
 		sqlTableEventsRules = config.SQLTablesPrefix + sqlTableEventsRules
 		sqlTableRulesActionsMapping = config.SQLTablesPrefix + sqlTableRulesActionsMapping
 		sqlTableTasks = config.SQLTablesPrefix + sqlTableTasks
+		sqlTableNodes = config.SQLTablesPrefix + sqlTableNodes
 		sqlTableSchemaVersion = config.SQLTablesPrefix + sqlTableSchemaVersion
 		providerLog(logger.LevelDebug, "sql table for users %q, folders %q users folders mapping %q admins %q "+
 			"api keys %q shares %q defender hosts %q defender events %q transfers %q  groups %q "+
 			"users groups mapping %q admins groups mapping %q groups folders mapping %q shared sessions %q "+
-			"schema version %q events actions %q events rules %q rules actions mapping %q tasks %q",
+			"schema version %q events actions %q events rules %q rules actions mapping %q tasks %q nodes %q",
 			sqlTableUsers, sqlTableFolders, sqlTableUsersFoldersMapping, sqlTableAdmins, sqlTableAPIKeys,
 			sqlTableShares, sqlTableDefenderHosts, sqlTableDefenderEvents, sqlTableActiveTransfers, sqlTableGroups,
 			sqlTableUsersGroupsMapping, sqlTableAdminsGroupsMapping, sqlTableGroupsFoldersMapping, sqlTableSharedSessions,
-			sqlTableSchemaVersion, sqlTableEventsActions, sqlTableEventsRules, sqlTableRulesActionsMapping, sqlTableTasks)
+			sqlTableSchemaVersion, sqlTableEventsActions, sqlTableEventsRules, sqlTableRulesActionsMapping,
+			sqlTableTasks, sqlTableNodes)
 	}
 	return nil
 }
@@ -1726,6 +1758,29 @@ func UpdateTask(name string, version int64) error {
 // UpdateTaskTimestamp updates the timestamp for the task with the specified name
 func UpdateTaskTimestamp(name string) error {
 	return provider.updateTaskTimestamp(name)
+}
+
+// GetNodes returns the other cluster nodes
+func GetNodes() ([]Node, error) {
+	if currentNode == nil {
+		return nil, nil
+	}
+	nodes, err := provider.getNodes()
+	if err != nil {
+		providerLog(logger.LevelError, "unable to get other cluster nodes %v", err)
+	}
+	return nodes, err
+}
+
+// GetNodeByName returns a node, different from the current one, by name
+func GetNodeByName(name string) (Node, error) {
+	if currentNode == nil {
+		return Node{}, util.NewRecordNotFoundError(errNoClusterNodes.Error())
+	}
+	if name == currentNode.Name {
+		return Node{}, util.NewValidationError(fmt.Sprintf("%s is the current node, it must refer to other nodes", name))
+	}
+	return provider.getNodeByName(name)
 }
 
 // HasAdmin returns true if the first admin has been created
@@ -3025,6 +3080,8 @@ func compareUnixPasswordAndHash(user *User, password string) (bool, error) {
 	var crypter crypt.Crypter
 	if strings.HasPrefix(user.Password, sha512cryptPwdPrefix) {
 		crypter = sha512_crypt.New()
+	} else if strings.HasPrefix(user.Password, sha256cryptPwdPrefix) {
+		crypter = sha256_crypt.New()
 	} else if strings.HasPrefix(user.Password, md5cryptPwdPrefix) {
 		crypter = md5_crypt.New()
 	} else if strings.HasPrefix(user.Password, md5cryptApr1PwdPrefix) {
@@ -3329,11 +3386,11 @@ func handleProgramInteractiveQuestions(client ssh.KeyboardInteractiveChallenge, 
 
 func executeKeyboardInteractiveProgram(user *User, authHook string, client ssh.KeyboardInteractiveChallenge, ip, protocol string) (int, error) {
 	authResult := 0
-	timeout, env := command.GetConfig(authHook)
+	timeout, env, args := command.GetConfig(authHook, command.HookKeyboardInteractive)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, authHook)
+	cmd := exec.CommandContext(ctx, authHook, args...)
 	cmd.Env = append(env,
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", user.Username),
 		fmt.Sprintf("SFTPGO_AUTHD_IP=%v", ip),
@@ -3462,11 +3519,11 @@ func getPasswordHookResponse(username, password, ip, protocol string) ([]byte, e
 		}
 		return io.ReadAll(io.LimitReader(resp.Body, maxHookResponseSize))
 	}
-	timeout, env := command.GetConfig(config.CheckPasswordHook)
+	timeout, env, args := command.GetConfig(config.CheckPasswordHook, command.HookCheckPassword)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, config.CheckPasswordHook)
+	cmd := exec.CommandContext(ctx, config.CheckPasswordHook, args...)
 	cmd.Env = append(env,
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", username),
 		fmt.Sprintf("SFTPGO_AUTHD_PASSWORD=%v", password),
@@ -3523,11 +3580,11 @@ func getPreLoginHookResponse(loginMethod, ip, protocol string, userAsJSON []byte
 		}
 		return io.ReadAll(io.LimitReader(resp.Body, maxHookResponseSize))
 	}
-	timeout, env := command.GetConfig(config.PreLoginHook)
+	timeout, env, args := command.GetConfig(config.PreLoginHook, command.HookPreLogin)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, config.PreLoginHook)
+	cmd := exec.CommandContext(ctx, config.PreLoginHook, args...)
 	cmd.Env = append(env,
 		fmt.Sprintf("SFTPGO_LOGIND_USER=%v", string(userAsJSON)),
 		fmt.Sprintf("SFTPGO_LOGIND_METHOD=%v", loginMethod),
@@ -3667,11 +3724,11 @@ func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err erro
 				user.Username, ip, protocol, respCode, time.Since(startTime), err)
 			return
 		}
-		timeout, env := command.GetConfig(config.PostLoginHook)
+		timeout, env, args := command.GetConfig(config.PostLoginHook, command.HookPostLogin)
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 
-		cmd := exec.CommandContext(ctx, config.PostLoginHook)
+		cmd := exec.CommandContext(ctx, config.PostLoginHook, args...)
 		cmd.Env = append(env,
 			fmt.Sprintf("SFTPGO_LOGIND_USER=%v", string(userAsJSON)),
 			fmt.Sprintf("SFTPGO_LOGIND_IP=%v", ip),
@@ -3735,11 +3792,11 @@ func getExternalAuthResponse(username, password, pkey, keyboardInteractive, ip, 
 			return nil, fmt.Errorf("unable to serialize user as JSON: %w", err)
 		}
 	}
-	timeout, env := command.GetConfig(config.ExternalAuthHook)
+	timeout, env, args := command.GetConfig(config.ExternalAuthHook, command.HookExternalAuth)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, config.ExternalAuthHook)
+	cmd := exec.CommandContext(ctx, config.ExternalAuthHook, args...)
 	cmd.Env = append(env,
 		fmt.Sprintf("SFTPGO_AUTHD_USERNAME=%v", username),
 		fmt.Sprintf("SFTPGO_AUTHD_USER=%v", string(userAsJSON)),

@@ -90,6 +90,10 @@ type OIDC struct {
 	Scopes []string `json:"scopes" mapstructure:"scopes"`
 	// Custom token claims fields to pass to the pre-login hook
 	CustomFields []string `json:"custom_fields" mapstructure:"custom_fields"`
+	// InsecureSkipSignatureCheck causes SFTPGo to skip JWT signature validation.
+	// It's intended for special cases where providers, such as Azure, use the "none"
+	// algorithm. Skipping the signature validation can cause security issues
+	InsecureSkipSignatureCheck bool `json:"insecure_skip_signature_check" mapstructure:"insecure_skip_signature_check"`
 	// Debug enables the OIDC debug mode. In debug mode, the received id_token will be logged
 	// at the debug level
 	Debug             bool `json:"debug" mapstructure:"debug"`
@@ -160,7 +164,8 @@ func (o *OIDC) initialize() error {
 	}
 	o.provider = provider
 	o.verifier = provider.Verifier(&oidc.Config{
-		ClientID: o.ClientID,
+		ClientID:                   o.ClientID,
+		InsecureSkipSignatureCheck: o.InsecureSkipSignatureCheck,
 	})
 	o.oauth2Config = &oauth2.Config{
 		ClientID:     o.ClientID,
@@ -190,19 +195,20 @@ func newOIDCPendingAuth(audience tokenAudience) oidcPendingAuth {
 }
 
 type oidcToken struct {
-	AccessToken  string          `json:"access_token"`
-	TokenType    string          `json:"token_type,omitempty"`
-	RefreshToken string          `json:"refresh_token,omitempty"`
-	ExpiresAt    int64           `json:"expires_at,omitempty"`
-	SessionID    string          `json:"session_id"`
-	IDToken      string          `json:"id_token"`
-	Nonce        string          `json:"nonce"`
-	Username     string          `json:"username"`
-	Permissions  []string        `json:"permissions"`
-	Role         any             `json:"role"`
-	CustomFields *map[string]any `json:"custom_fields,omitempty"`
-	Cookie       string          `json:"cookie"`
-	UsedAt       int64           `json:"used_at"`
+	AccessToken          string          `json:"access_token"`
+	TokenType            string          `json:"token_type,omitempty"`
+	RefreshToken         string          `json:"refresh_token,omitempty"`
+	ExpiresAt            int64           `json:"expires_at,omitempty"`
+	SessionID            string          `json:"session_id"`
+	IDToken              string          `json:"id_token"`
+	Nonce                string          `json:"nonce"`
+	Username             string          `json:"username"`
+	Permissions          []string        `json:"permissions"`
+	HideUserPageSections int             `json:"hide_user_page_sections,omitempty"`
+	Role                 any             `json:"role"`
+	CustomFields         *map[string]any `json:"custom_fields,omitempty"`
+	Cookie               string          `json:"cookie"`
+	UsedAt               int64           `json:"used_at"`
 }
 
 func (t *oidcToken) parseClaims(claims map[string]any, usernameField, roleField string, customFields []string,
@@ -307,7 +313,7 @@ func (t *oidcToken) isExpired() bool {
 	return t.ExpiresAt < util.GetTimeAsMsSinceEpoch(time.Now())
 }
 
-func (t *oidcToken) refresh(config OAuth2Config, verifier OIDCTokenVerifier) error {
+func (t *oidcToken) refresh(config OAuth2Config, verifier OIDCTokenVerifier, r *http.Request) error {
 	if t.RefreshToken == "" {
 		logger.Debug(logSender, "", "refresh token not set, unable to refresh cookie %#v", t.Cookie)
 		return errors.New("refresh token not set")
@@ -362,9 +368,41 @@ func (t *oidcToken) refresh(config OAuth2Config, verifier OIDCTokenVerifier) err
 	if ok {
 		t.SessionID = sid
 	}
+	err = t.refreshUser(r)
+	if err != nil {
+		logger.Debug(logSender, "", "unable to refresh user after token refresh for cookie %#v: %v", t.Cookie, err)
+		return err
+	}
 	logger.Debug(logSender, "", "oidc token refreshed for user %#v, cookie %#v", t.Username, t.Cookie)
 	oidcMgr.addToken(*t)
 
+	return nil
+}
+
+func (t *oidcToken) refreshUser(r *http.Request) error {
+	if t.isAdmin() {
+		admin, err := dataprovider.AdminExists(t.Username)
+		if err != nil {
+			return err
+		}
+		if err := admin.CanLogin(util.GetIPFromRemoteAddress(r.RemoteAddr)); err != nil {
+			return err
+		}
+		t.Permissions = admin.Permissions
+		t.HideUserPageSections = admin.Filters.Preferences.HideUserPageSections
+		return nil
+	}
+	user, err := dataprovider.GetUserWithGroupSettings(t.Username)
+	if err != nil {
+		return err
+	}
+	if err := user.CheckLoginConditions(); err != nil {
+		return err
+	}
+	if err := checkHTTPClientUser(&user, r, xid.New().String(), true); err != nil {
+		return err
+	}
+	t.Permissions = user.Filters.WebClient
 	return nil
 }
 
@@ -378,6 +416,7 @@ func (t *oidcToken) getUser(r *http.Request) error {
 			return err
 		}
 		t.Permissions = admin.Permissions
+		t.HideUserPageSections = admin.Filters.Preferences.HideUserPageSections
 		dataprovider.UpdateAdminLastLogin(&admin)
 		return nil
 	}
@@ -436,7 +475,7 @@ func (s *httpdServer) validateOIDCToken(w http.ResponseWriter, r *http.Request, 
 	}
 	if token.isExpired() {
 		logger.Debug(logSender, "", "oidc token associated with cookie %#v is expired", token.Cookie)
-		if err = token.refresh(s.binding.OIDC.oauth2Config, s.binding.OIDC.verifier); err != nil {
+		if err = token.refresh(s.binding.OIDC.oauth2Config, s.binding.OIDC.verifier, r); err != nil {
 			setFlashMessage(w, r, "Your OpenID token is expired, please log-in again")
 			doRedirect()
 			return oidcToken{}, errInvalidToken
@@ -474,8 +513,9 @@ func (s *httpdServer) oidcTokenAuthenticator(audience tokenAudience) func(next h
 				return
 			}
 			jwtTokenClaims := jwtTokenClaims{
-				Username:    token.Username,
-				Permissions: token.Permissions,
+				Username:             token.Username,
+				Permissions:          token.Permissions,
+				HideUserPageSections: token.HideUserPageSections,
 			}
 			_, tokenString, err := jwtTokenClaims.createToken(s.tokenAuth, audience, util.GetIPFromRemoteAddress(r.RemoteAddr))
 			if err != nil {

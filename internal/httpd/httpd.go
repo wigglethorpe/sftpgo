@@ -159,6 +159,7 @@ const (
 	webClientForgotPwdPathDefault         = "/web/client/forgot-password"
 	webClientResetPwdPathDefault          = "/web/client/reset-password"
 	webClientViewPDFPathDefault           = "/web/client/viewpdf"
+	webClientGetPDFPathDefault            = "/web/client/getpdf"
 	webStaticFilesPathDefault             = "/static"
 	webOpenAPIPathDefault                 = "/openapi"
 	// MaxRestoreSize defines the max size for the loaddata input file
@@ -244,6 +245,7 @@ var (
 	webClientForgotPwdPath         string
 	webClientResetPwdPath          string
 	webClientViewPDFPath           string
+	webClientGetPDFPath            string
 	webStaticFilesPath             string
 	webOpenAPIPath                 string
 	// max upload size for http clients, 1GB by default
@@ -410,6 +412,8 @@ type Binding struct {
 	// Enable the built-in client interface.
 	// You have to define TemplatesPath and StaticFilesPath for this to work
 	EnableWebClient bool `json:"enable_web_client" mapstructure:"enable_web_client"`
+	// Enable REST API
+	EnableRESTAPI bool `json:"enable_rest_api" mapstructure:"enable_rest_api"`
 	// Defines the login methods available for the WebAdmin and WebClient UIs:
 	//
 	// - 0 means any configured method: username/password login form and OIDC, if enabled
@@ -522,6 +526,9 @@ func (b *Binding) GetAddress() string {
 
 // IsValid returns true if the binding is valid
 func (b *Binding) IsValid() bool {
+	if !b.EnableRESTAPI && !b.EnableWebAdmin && !b.EnableWebClient {
+		return false
+	}
 	if b.Port > 0 {
 		return true
 	}
@@ -962,6 +969,7 @@ func updateWebClientURLs(baseURL string) {
 	webClientForgotPwdPath = path.Join(baseURL, webClientForgotPwdPathDefault)
 	webClientResetPwdPath = path.Join(baseURL, webClientResetPwdPathDefault)
 	webClientViewPDFPath = path.Join(baseURL, webClientViewPDFPathDefault)
+	webClientGetPDFPath = path.Join(baseURL, webClientGetPDFPathDefault)
 }
 
 func updateWebAdminURLs(baseURL string) {

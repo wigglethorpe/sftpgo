@@ -41,7 +41,7 @@ import (
 
 	"github.com/go-chi/render"
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/lithammer/shortuuid/v3"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mhale/smtpd"
@@ -174,6 +174,7 @@ const (
 	webClientForgotPwdPath         = "/web/client/forgot-password"
 	webClientResetPwdPath          = "/web/client/reset-password"
 	webClientViewPDFPath           = "/web/client/viewpdf"
+	webClientGetPDFPath            = "/web/client/getpdf"
 	webAdminEventRulesPath         = "/web/admin/eventrules"
 	webAdminEventRulePath          = "/web/admin/eventrule"
 	webAdminEventActionsPath       = "/web/admin/eventactions"
@@ -295,6 +296,7 @@ func TestMain(m *testing.M) {
 	logger.InitLogger(logfilePath, 5, 1, 28, false, false, zerolog.DebugLevel)
 	os.Setenv("SFTPGO_COMMON__UPLOAD_MODE", "2")
 	os.Setenv("SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN", "1")
+	os.Setenv("SFTPGO_COMMON__ALLOW_SELF_CONNECTIONS", "1")
 	os.Setenv("SFTPGO_DATA_PROVIDER__NAMING_RULES", "0")
 	os.Setenv("SFTPGO_DEFAULT_ADMIN_USERNAME", "admin")
 	os.Setenv("SFTPGO_DEFAULT_ADMIN_PASSWORD", "password")
@@ -1693,6 +1695,18 @@ func TestEventActionValidation(t *testing.T) {
 	_, resp, err = httpdtest.AddEventAction(action, http.StatusBadRequest)
 	assert.NoError(t, err)
 	assert.Contains(t, string(resp), "invalid path to check for existence")
+	action.Options.FsConfig.Type = dataprovider.FilesystemActionCompress
+	_, resp, err = httpdtest.AddEventAction(action, http.StatusBadRequest)
+	assert.NoError(t, err)
+	assert.Contains(t, string(resp), "archive name is mandatory")
+	action.Options.FsConfig.Compress.Name = "archive.zip"
+	_, resp, err = httpdtest.AddEventAction(action, http.StatusBadRequest)
+	assert.NoError(t, err)
+	assert.Contains(t, string(resp), "no path to compress specified")
+	action.Options.FsConfig.Compress.Paths = []string{"item1", ""}
+	_, resp, err = httpdtest.AddEventAction(action, http.StatusBadRequest)
+	assert.NoError(t, err)
+	assert.Contains(t, string(resp), "invalid path to compress")
 }
 
 func TestEventRuleValidation(t *testing.T) {
@@ -2707,16 +2721,32 @@ func TestBasicAdminHandling(t *testing.T) {
 	assert.NoError(t, err)
 
 	admin.Username = altAdminUsername
+	admin.Filters.Preferences.HideUserPageSections = 1 + 4 + 8
 	admin, _, err = httpdtest.AddAdmin(admin, http.StatusCreated)
 	assert.NoError(t, err)
 
 	admin, _, err = httpdtest.GetAdminByUsername(admin.Username, http.StatusOK)
 	assert.NoError(t, err)
+	assert.True(t, admin.Filters.Preferences.HideGroups())
+	assert.False(t, admin.Filters.Preferences.HideFilesystem())
+	assert.True(t, admin.Filters.Preferences.HideVirtualFolders())
+	assert.True(t, admin.Filters.Preferences.HideProfile())
+	assert.False(t, admin.Filters.Preferences.HideACLs())
+	assert.False(t, admin.Filters.Preferences.HideDiskQuotaAndBandwidthLimits())
+	assert.False(t, admin.Filters.Preferences.HideAdvancedSettings())
 
 	admin.AdditionalInfo = "test info"
+	admin.Filters.Preferences.HideUserPageSections = 16 + 32 + 64
 	admin, _, err = httpdtest.UpdateAdmin(admin, http.StatusOK)
 	assert.NoError(t, err)
 	assert.Equal(t, "test info", admin.AdditionalInfo)
+	assert.False(t, admin.Filters.Preferences.HideGroups())
+	assert.False(t, admin.Filters.Preferences.HideFilesystem())
+	assert.False(t, admin.Filters.Preferences.HideVirtualFolders())
+	assert.False(t, admin.Filters.Preferences.HideProfile())
+	assert.True(t, admin.Filters.Preferences.HideACLs())
+	assert.True(t, admin.Filters.Preferences.HideDiskQuotaAndBandwidthLimits())
+	assert.True(t, admin.Filters.Preferences.HideAdvancedSettings())
 
 	admins, _, err = httpdtest.GetAdmins(1, 0, http.StatusOK)
 	assert.NoError(t, err)
@@ -10325,6 +10355,15 @@ func TestDeleteActiveConnectionMock(t *testing.T) {
 	setBearerForReq(req, token)
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusNotFound, rr)
+	req.Header.Set(dataprovider.NodeTokenHeader, "Bearer abc")
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusUnauthorized, rr)
+	assert.Contains(t, rr.Body.String(), "the provided token cannot be authenticated")
+	req, err = http.NewRequest(http.MethodDelete, activeConnectionsPath+"/connectionID?node=node1", nil)
+	assert.NoError(t, err)
+	setBearerForReq(req, token)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusNotFound, rr)
 }
 
 func TestNotFoundMock(t *testing.T) {
@@ -10919,6 +10958,13 @@ func TestMaxSessions(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "too many open sessions")
 
 	req, err = http.NewRequest(http.MethodGet, webClientEditFilePath+"?path=file", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusTooManyRequests, rr)
+	assert.Contains(t, rr.Body.String(), "too many open sessions")
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=file", nil)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
@@ -11639,6 +11685,12 @@ func TestShareMaxSessions(t *testing.T) {
 	checkResponseCode(t, http.StatusTooManyRequests, rr)
 	assert.Contains(t, rr.Body.String(), "too many open sessions")
 
+	req, err = http.NewRequest(http.MethodGet, webClientPubSharesPath+"/"+objectID+"/partial", nil)
+	assert.NoError(t, err)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusTooManyRequests, rr)
+	assert.Contains(t, rr.Body.String(), "too many open sessions")
+
 	req, err = http.NewRequest(http.MethodGet, sharesPath+"/"+objectID, nil)
 	assert.NoError(t, err)
 	rr = executeRequest(req)
@@ -11832,6 +11884,30 @@ func TestShareReadWrite(t *testing.T) {
 	checkResponseCode(t, http.StatusOK, rr)
 	contentDisposition := rr.Header().Get("Content-Disposition")
 	assert.NotEmpty(t, contentDisposition)
+
+	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "partial?files="+
+		url.QueryEscape(fmt.Sprintf(`["%v"]`, testFileName))), nil)
+	assert.NoError(t, err)
+	req.SetBasicAuth(defaultUsername, defaultPassword)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+	contentDisposition = rr.Header().Get("Content-Disposition")
+	assert.NotEmpty(t, contentDisposition)
+	assert.Equal(t, "application/zip", rr.Header().Get("Content-Type"))
+	// invalid files list
+	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "partial?files="+testFileName), nil)
+	assert.NoError(t, err)
+	req.SetBasicAuth(defaultUsername, defaultPassword)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusInternalServerError, rr)
+	assert.Contains(t, rr.Body.String(), "Unable to get files list")
+	// missing directory
+	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "partial?path=missing"), nil)
+	assert.NoError(t, err)
+	req.SetBasicAuth(defaultUsername, defaultPassword)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusInternalServerError, rr)
+	assert.Contains(t, rr.Body.String(), "Unable to get files list")
 
 	req, err = http.NewRequest(http.MethodPost, path.Join(sharesPath, objectID)+"/"+url.PathEscape("../"+testFileName),
 		bytes.NewBuffer(content))
@@ -12137,6 +12213,12 @@ func TestBrowseShares(t *testing.T) {
 	contentDisposition := rr.Header().Get("Content-Disposition")
 	assert.NotEmpty(t, contentDisposition)
 
+	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "partial?path=%2F.."), nil)
+	assert.NoError(t, err)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Invalid share path")
+
 	req, err = http.NewRequest(http.MethodGet, path.Join(sharesPath, objectID, "files?path="+testFileName), nil)
 	assert.NoError(t, err)
 	rr = executeRequest(req)
@@ -12212,6 +12294,12 @@ func TestBrowseShares(t *testing.T) {
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusBadRequest, rr)
 
+	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "partial"), nil)
+	assert.NoError(t, err)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Unable to validate share")
+
 	req, err = http.NewRequest(http.MethodGet, path.Join(sharesPath, objectID, "files?path="+testFileName), nil)
 	assert.NoError(t, err)
 	rr = executeRequest(req)
@@ -12247,6 +12335,11 @@ func TestBrowseShares(t *testing.T) {
 	checkResponseCode(t, http.StatusNotFound, rr)
 
 	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "browse?path=%2F"), nil)
+	assert.NoError(t, err)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusNotFound, rr)
+
+	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "partial?path=%2F"), nil)
 	assert.NoError(t, err)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusNotFound, rr)
@@ -12897,16 +12990,105 @@ func TestWebClientViewPDF(t *testing.T) {
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusBadRequest, rr)
 
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath, nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+
 	req, err = http.NewRequest(http.MethodGet, webClientViewPDFPath+"?path=test.pdf", nil)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=test.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Unable to get file")
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2F", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Invalid file")
+
+	err = os.WriteFile(filepath.Join(user.GetHomeDir(), "test.pdf"), []byte("some text data"), 0666)
+	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Invalid PDF file")
+
+	err = createTestFile(filepath.Join(user.GetHomeDir(), "test.pdf"), 1024)
+	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "does not look like a PDF")
+
+	fakePDF := []byte(`%PDF-1.6`)
+	for i := 0; i < 128; i++ {
+		fakePDF = append(fakePDF, []byte(fmt.Sprintf("%d", i))...)
+	}
+	err = os.WriteFile(filepath.Join(user.GetHomeDir(), "test.pdf"), fakePDF, 0666)
+	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	user.Filters.FilePatterns = []sdk.PatternsFilter{
+		{
+			Path:           "/",
+			DeniedPatterns: []string{"*.pdf"},
+		},
+	}
+	_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
+	assert.Contains(t, rr.Body.String(), "Unable to get a reader for the file")
+
+	user.Filters.FilePatterns = []sdk.PatternsFilter{
+		{
+			Path:           "/",
+			DeniedPatterns: []string{"*.txt"},
+		},
+	}
+	user.Filters.DeniedProtocols = []string{common.ProtocolHTTP}
+	_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
+
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusNotFound, rr)
 }
 
 func TestWebEditFile(t *testing.T) {
@@ -13987,6 +14169,12 @@ func TestWebFilesTransferQuotaLimits(t *testing.T) {
 	assert.NoError(t, err)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusForbidden, rr)
+
+	req, err = http.NewRequest(http.MethodGet, path.Join(webClientPubSharesPath, objectID, "/partial"), nil)
+	assert.NoError(t, err)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
+	assert.Contains(t, rr.Body.String(), "Denying share read due to quota limits")
 
 	share2 := dataprovider.Share{
 		Name:  "share2",
@@ -15669,6 +15857,7 @@ func TestWebAdminPwdChange(t *testing.T) {
 	admin := getTestAdmin()
 	admin.Username = altAdminUsername
 	admin.Password = altAdminPassword
+	admin.Filters.Preferences.HideUserPageSections = 16 + 32
 	admin, _, err := httpdtest.AddAdmin(admin, http.StatusCreated)
 	assert.NoError(t, err)
 
@@ -16217,6 +16406,13 @@ func TestWebAdminBasicMock(t *testing.T) {
 	form.Set("status", "1")
 	form.Set("permissions", "*")
 	form.Set("description", admin.Description)
+	form.Set("user_page_hidden_sections", "1")
+	form.Add("user_page_hidden_sections", "2")
+	form.Add("user_page_hidden_sections", "3")
+	form.Add("user_page_hidden_sections", "4")
+	form.Add("user_page_hidden_sections", "5")
+	form.Add("user_page_hidden_sections", "6")
+	form.Add("user_page_hidden_sections", "7")
 	req, _ := http.NewRequest(http.MethodPost, webAdminPath, bytes.NewBuffer([]byte(form.Encode())))
 	req.RemoteAddr = defaultRemoteAddr
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -16284,6 +16480,7 @@ func TestWebAdminBasicMock(t *testing.T) {
 	assert.True(t, admin.Filters.TOTPConfig.Enabled)
 	secretPayload := admin.Filters.TOTPConfig.Secret.GetPayload()
 	assert.NotEmpty(t, secretPayload)
+	assert.Equal(t, 1+2+4+8+16+32+64, admin.Filters.Preferences.HideUserPageSections)
 
 	adminTOTPConfig = dataprovider.AdminTOTPConfig{
 		Enabled:    true,

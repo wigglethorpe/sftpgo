@@ -45,10 +45,16 @@ var (
 	// ErrStorageSizeUnavailable is returned if the storage backend does not support getting the size
 	ErrStorageSizeUnavailable = errors.New("unable to get available size for this storage backend")
 	// ErrVfsUnsupported defines the error for an unsupported VFS operation
-	ErrVfsUnsupported = errors.New("not supported")
-	tempPath          string
-	sftpFingerprints  []string
+	ErrVfsUnsupported    = errors.New("not supported")
+	tempPath             string
+	sftpFingerprints     []string
+	allowSelfConnections int
 )
+
+// SetAllowSelfConnections sets the desired behaviour for self connections
+func SetAllowSelfConnections(value int) {
+	allowSelfConnections = value
+}
 
 // SetTempPath sets the path for temporary files
 func SetTempPath(fsPath string) {
@@ -744,6 +750,20 @@ func IsLocalOrSFTPFs(fs Fs) bool {
 // HasTruncateSupport returns true if the fs supports truncate files
 func HasTruncateSupport(fs Fs) bool {
 	return IsLocalOsFs(fs) || IsSFTPFs(fs) || IsHTTPFs(fs)
+}
+
+// HasImplicitAtomicUploads returns true if the fs don't persists partial files on error
+func HasImplicitAtomicUploads(fs Fs) bool {
+	if strings.HasPrefix(fs.Name(), s3fsName) {
+		return true
+	}
+	if strings.HasPrefix(fs.Name(), gcsfsName) {
+		return true
+	}
+	if strings.HasPrefix(fs.Name(), azBlobFsName) {
+		return true
+	}
+	return false
 }
 
 // HasOpenRWSupport returns true if the fs can open a file

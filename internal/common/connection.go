@@ -546,6 +546,13 @@ func (c *BaseConnection) Rename(virtualSourcePath, virtualTargetPath string) err
 
 // CreateSymlink creates fsTargetPath as a symbolic link to fsSourcePath
 func (c *BaseConnection) CreateSymlink(virtualSourcePath, virtualTargetPath string) error {
+	var relativePath string
+	if !path.IsAbs(virtualSourcePath) {
+		relativePath = virtualSourcePath
+		virtualSourcePath = path.Join(path.Dir(virtualTargetPath), relativePath)
+		c.Log(logger.LevelDebug, "link relative path %q resolved as %q, target path %q",
+			relativePath, virtualSourcePath, virtualTargetPath)
+	}
 	if c.isCrossFoldersRequest(virtualSourcePath, virtualTargetPath) {
 		c.Log(logger.LevelWarn, "cross folder symlink is not supported, src: %v dst: %v", virtualSourcePath, virtualTargetPath)
 		return c.GetOpUnsupportedError()
@@ -579,6 +586,9 @@ func (c *BaseConnection) CreateSymlink(virtualSourcePath, virtualTargetPath stri
 		c.Log(logger.LevelError, "symlink target path %#v is not allowed", virtualTargetPath)
 		return c.GetPermissionDeniedError()
 	}
+	if relativePath != "" {
+		fsSourcePath = relativePath
+	}
 	if err := fs.Symlink(fsSourcePath, fsTargetPath); err != nil {
 		c.Log(logger.LevelError, "failed to create symlink %#v -> %#v: %+v", fsSourcePath, fsTargetPath, err)
 		return c.GetFsError(fs, err)
@@ -598,8 +608,9 @@ func (c *BaseConnection) getPathForSetStatPerms(fs vfs.Fs, fsPath, virtualPath s
 	return pathForPerms
 }
 
-// DoStat execute a Stat if mode = 0, Lstat if mode = 1
-func (c *BaseConnection) DoStat(virtualPath string, mode int, checkFilePatterns bool) (os.FileInfo, error) {
+func (c *BaseConnection) doStatInternal(virtualPath string, mode int, checkFilePatterns,
+	convertResult bool,
+) (os.FileInfo, error) {
 	// for some vfs we don't create intermediary folders so we cannot simply check
 	// if virtualPath is a virtual folder
 	vfolders := c.User.GetVirtualFoldersInPath(path.Dir(virtualPath))
@@ -629,10 +640,15 @@ func (c *BaseConnection) DoStat(virtualPath string, mode int, checkFilePatterns 
 		c.Log(logger.LevelWarn, "stat error for path %#v: %+v", virtualPath, err)
 		return info, c.GetFsError(fs, err)
 	}
-	if vfs.IsCryptOsFs(fs) {
+	if convertResult && vfs.IsCryptOsFs(fs) {
 		info = fs.(*vfs.CryptFs).ConvertFileInfo(info)
 	}
 	return info, nil
+}
+
+// DoStat execute a Stat if mode = 0, Lstat if mode = 1
+func (c *BaseConnection) DoStat(virtualPath string, mode int, checkFilePatterns bool) (os.FileInfo, error) {
+	return c.doStatInternal(virtualPath, mode, checkFilePatterns, true)
 }
 
 func (c *BaseConnection) createDirIfMissing(name string) error {

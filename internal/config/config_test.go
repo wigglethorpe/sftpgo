@@ -84,9 +84,36 @@ func TestLoadConfigFileNotFound(t *testing.T) {
 
 	viper.SetConfigName("configfile")
 	err := config.LoadConfig(os.TempDir(), "")
-	assert.NoError(t, err)
+	require.NoError(t, err)
 	mfaConf := config.GetMFAConfig()
-	assert.Len(t, mfaConf.TOTP, 1)
+	require.Len(t, mfaConf.TOTP, 1)
+	require.Len(t, config.GetCommonConfig().RateLimitersConfig, 1)
+	require.Len(t, config.GetCommonConfig().RateLimitersConfig[0].Protocols, 4)
+	require.Len(t, config.GetHTTPDConfig().Bindings, 1)
+	require.Len(t, config.GetHTTPDConfig().Bindings[0].OIDC.Scopes, 3)
+}
+
+func TestReadEnvFiles(t *testing.T) {
+	reset()
+
+	envd := filepath.Join(configDir, "env.d")
+	err := os.Mkdir(envd, os.ModePerm)
+	assert.NoError(t, err)
+
+	err = os.WriteFile(filepath.Join(envd, "env1"), []byte("SFTPGO_SFTPD__MAX_AUTH_TRIES = 10"), 0666)
+	assert.NoError(t, err)
+	err = os.WriteFile(filepath.Join(envd, "env2"), []byte(`{"invalid env": "value"}`), 0666)
+	assert.NoError(t, err)
+
+	err = config.LoadConfig(configDir, "")
+	assert.NoError(t, err)
+	assert.Equal(t, 10, config.GetSFTPDConfig().MaxAuthTries)
+
+	_, ok := os.LookupEnv("SFTPGO_SFTPD__MAX_AUTH_TRIES")
+	assert.True(t, ok)
+	err = os.Unsetenv("SFTPGO_SFTPD__MAX_AUTH_TRIES")
+	assert.NoError(t, err)
+	os.RemoveAll(envd)
 }
 
 func TestEmptyBanner(t *testing.T) {
@@ -464,6 +491,81 @@ func TestDisabledMFAConfig(t *testing.T) {
 	assert.Len(t, mfaConf.TOTP, 0)
 	err = os.Remove(configFilePath)
 	assert.NoError(t, err)
+}
+
+func TestOverrideSliceValues(t *testing.T) {
+	reset()
+
+	confName := tempConfigName + ".json"
+	configFilePath := filepath.Join(configDir, confName)
+	c := make(map[string]any)
+	c["common"] = common.Configuration{
+		RateLimitersConfig: []common.RateLimiterConfig{
+			{
+				Type:      1,
+				Protocols: []string{"HTTP"},
+			},
+		},
+	}
+	jsonConf, err := json.Marshal(c)
+	assert.NoError(t, err)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, confName)
+	assert.NoError(t, err)
+	require.Len(t, config.GetCommonConfig().RateLimitersConfig, 1)
+	require.Equal(t, []string{"HTTP"}, config.GetCommonConfig().RateLimitersConfig[0].Protocols)
+
+	reset()
+
+	// empty ratelimiters, default value should be used
+	c["common"] = common.Configuration{}
+	jsonConf, err = json.Marshal(c)
+	assert.NoError(t, err)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, confName)
+	assert.NoError(t, err)
+	require.Len(t, config.GetCommonConfig().RateLimitersConfig, 1)
+	rl := config.GetCommonConfig().RateLimitersConfig[0]
+	require.Equal(t, []string{"SSH", "FTP", "DAV", "HTTP"}, rl.Protocols)
+	require.Equal(t, int64(1000), rl.Period)
+
+	reset()
+
+	c = make(map[string]any)
+	c["httpd"] = httpd.Conf{
+		Bindings: []httpd.Binding{
+			{
+				OIDC: httpd.OIDC{
+					Scopes: []string{"scope1"},
+				},
+			},
+		},
+	}
+	jsonConf, err = json.Marshal(c)
+	assert.NoError(t, err)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, confName)
+	assert.NoError(t, err)
+	require.Len(t, config.GetHTTPDConfig().Bindings, 1)
+	require.Equal(t, []string{"scope1"}, config.GetHTTPDConfig().Bindings[0].OIDC.Scopes)
+
+	reset()
+
+	c = make(map[string]any)
+	c["httpd"] = httpd.Conf{
+		Bindings: []httpd.Binding{},
+	}
+	jsonConf, err = json.Marshal(c)
+	assert.NoError(t, err)
+	err = os.WriteFile(configFilePath, jsonConf, os.ModePerm)
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, confName)
+	assert.NoError(t, err)
+	require.Len(t, config.GetHTTPDConfig().Bindings, 1)
+	require.Equal(t, []string{"openid", "profile", "email"}, config.GetHTTPDConfig().Bindings[0].OIDC.Scopes)
 }
 
 func TestFTPDOverridesFromEnv(t *testing.T) {
@@ -1019,6 +1121,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__PORT", "9000")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__ENABLE_WEB_ADMIN", "0")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__ENABLE_WEB_CLIENT", "0")
+	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__ENABLE_REST_API", "0")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__ENABLED_LOGIN_METHODS", "3")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__RENDER_OPENAPI", "0")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__ENABLE_HTTPS", "1 ")
@@ -1042,6 +1145,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__SCOPES", "openid")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__IMPLICIT_ROLES", "1")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__CUSTOM_FIELDS", "field1,field2")
+	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__INSECURE_SKIP_SIGNATURE_CHECK", "1")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__DEBUG", "1")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__SECURITY__ENABLED", "true")
 	os.Setenv("SFTPGO_HTTPD__BINDINGS__2__SECURITY__ALLOWED_HOSTS", "*.example.com,*.example.net")
@@ -1088,6 +1192,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__MIN_TLS_VERSION")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__ENABLE_WEB_ADMIN")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__ENABLE_WEB_CLIENT")
+		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__ENABLE_REST_API")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__ENABLED_LOGIN_METHODS")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__RENDER_OPENAPI")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__CLIENT_AUTH_TYPE")
@@ -1109,6 +1214,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__SCOPES")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__IMPLICIT_ROLES")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__CUSTOM_FIELDS")
+		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__INSECURE_SKIP_SIGNATURE_CHECK")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__OIDC__DEBUG")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__SECURITY__ENABLED")
 		os.Unsetenv("SFTPGO_HTTPD__BINDINGS__2__SECURITY__ALLOWED_HOSTS")
@@ -1149,6 +1255,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 	require.Equal(t, 12, bindings[0].MinTLSVersion)
 	require.True(t, bindings[0].EnableWebAdmin)
 	require.True(t, bindings[0].EnableWebClient)
+	require.True(t, bindings[0].EnableRESTAPI)
 	require.Equal(t, 0, bindings[0].EnabledLoginMethods)
 	require.True(t, bindings[0].RenderOpenAPI)
 	require.Len(t, bindings[0].TLSCipherSuites, 1)
@@ -1158,6 +1265,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 	require.False(t, bindings[0].Security.Enabled)
 	require.Equal(t, 0, bindings[0].ClientIPHeaderDepth)
 	require.Len(t, bindings[0].OIDC.Scopes, 3)
+	require.False(t, bindings[0].OIDC.InsecureSkipSignatureCheck)
 	require.False(t, bindings[0].OIDC.Debug)
 	require.Equal(t, 8000, bindings[1].Port)
 	require.Equal(t, "127.0.0.1", bindings[1].Address)
@@ -1165,12 +1273,14 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 	require.Equal(t, 12, bindings[0].MinTLSVersion)
 	require.True(t, bindings[1].EnableWebAdmin)
 	require.True(t, bindings[1].EnableWebClient)
+	require.True(t, bindings[1].EnableRESTAPI)
 	require.Equal(t, 0, bindings[1].EnabledLoginMethods)
 	require.True(t, bindings[1].RenderOpenAPI)
 	require.Nil(t, bindings[1].TLSCipherSuites)
 	require.Equal(t, 1, bindings[1].HideLoginURL)
 	require.Empty(t, bindings[1].OIDC.ClientID)
 	require.Len(t, bindings[1].OIDC.Scopes, 3)
+	require.False(t, bindings[1].OIDC.InsecureSkipSignatureCheck)
 	require.False(t, bindings[1].OIDC.Debug)
 	require.False(t, bindings[1].Security.Enabled)
 	require.Equal(t, "Web Admin", bindings[1].Branding.WebAdmin.Name)
@@ -1182,6 +1292,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 	require.Equal(t, 13, bindings[2].MinTLSVersion)
 	require.False(t, bindings[2].EnableWebAdmin)
 	require.False(t, bindings[2].EnableWebClient)
+	require.False(t, bindings[2].EnableRESTAPI)
 	require.Equal(t, 3, bindings[2].EnabledLoginMethods)
 	require.False(t, bindings[2].RenderOpenAPI)
 	require.Equal(t, 1, bindings[2].ClientAuthType)
@@ -1209,6 +1320,7 @@ func TestHTTPDBindingsFromEnv(t *testing.T) {
 	require.Len(t, bindings[2].OIDC.CustomFields, 2)
 	require.Equal(t, "field1", bindings[2].OIDC.CustomFields[0])
 	require.Equal(t, "field2", bindings[2].OIDC.CustomFields[1])
+	require.True(t, bindings[2].OIDC.InsecureSkipSignatureCheck)
 	require.True(t, bindings[2].OIDC.Debug)
 	require.True(t, bindings[2].Security.Enabled)
 	require.Len(t, bindings[2].Security.AllowedHosts, 2)

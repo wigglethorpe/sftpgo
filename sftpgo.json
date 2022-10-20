@@ -18,6 +18,7 @@
     "max_total_connections": 0,
     "max_per_host_connections": 20,
     "whitelist_file": "",
+    "allow_self_connections": 0,
     "defender": {
       "enabled": false,
       "driver": "memory",
@@ -191,6 +192,7 @@
     "password": "",
     "sslmode": 0,
     "disable_sni": false,
+    "target_session_attrs": "",
     "root_cert": "",
     "client_cert": "",
     "client_key": "",
@@ -236,6 +238,11 @@
     "create_default_admin": false,
     "naming_rules": 1,
     "is_shared": 0,
+    "node": {
+      "host": "",
+      "port": 0,
+      "proto": "http"
+    },
     "backups_path": "backups"
   },
   "httpd": {
@@ -245,6 +252,7 @@
         "address": "",
         "enable_web_admin": true,
         "enable_web_client": true,
+        "enable_rest_api": true,
         "enabled_login_methods": 0,
         "enable_https": false,
         "certificate_file": "",
@@ -272,6 +280,7 @@
           "role_field": "",
           "implicit_roles": false,
           "custom_fields": [],
+          "insecure_skip_signature_check": false,
           "debug": false
         },
         "security": {

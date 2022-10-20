@@ -621,6 +621,161 @@ func getCSVRetentionReport(results []folderRetentionCheckResult) ([]byte, error)
 	return b.Bytes(), err
 }
 
+func closeWriterAndUpdateQuota(w io.WriteCloser, conn *BaseConnection, virtualPath string, numFiles int,
+	truncatedSize int64, errTransfer error,
+) error {
+	errWrite := w.Close()
+	info, err := conn.doStatInternal(virtualPath, 0, false, false)
+	if err == nil {
+		updateUserQuotaAfterFileWrite(conn, virtualPath, numFiles, info.Size()-truncatedSize)
+		_, fsPath, errFs := conn.GetFsAndResolvedPath(virtualPath)
+		if errFs == nil {
+			if errTransfer == nil {
+				errTransfer = errWrite
+			}
+			ExecuteActionNotification(conn, operationUpload, fsPath, virtualPath, "", "", "", info.Size(), errTransfer) //nolint:errcheck
+		}
+	} else {
+		eventManagerLog(logger.LevelWarn, "unable to update quota after writing %q: %v", virtualPath, err)
+	}
+	return errWrite
+}
+
+func updateUserQuotaAfterFileWrite(conn *BaseConnection, virtualPath string, numFiles int, fileSize int64) {
+	vfolder, err := conn.User.GetVirtualFolderForPath(path.Dir(virtualPath))
+	if err != nil {
+		dataprovider.UpdateUserQuota(&conn.User, numFiles, fileSize, false) //nolint:errcheck
+		return
+	}
+	dataprovider.UpdateVirtualFolderQuota(&vfolder.BaseVirtualFolder, numFiles, fileSize, false) //nolint:errcheck
+	if vfolder.IsIncludedInUserQuota() {
+		dataprovider.UpdateUserQuota(&conn.User, numFiles, fileSize, false) //nolint:errcheck
+	}
+}
+
+func getFileWriter(conn *BaseConnection, virtualPath string) (io.WriteCloser, int, int64, func(), error) {
+	fs, fsPath, err := conn.GetFsAndResolvedPath(virtualPath)
+	if err != nil {
+		return nil, 0, 0, nil, err
+	}
+	var truncatedSize, fileSize int64
+	numFiles := 1
+	isFileOverwrite := false
+
+	info, err := fs.Lstat(fsPath)
+	if err == nil {
+		fileSize = info.Size()
+		if info.IsDir() {
+			return nil, numFiles, truncatedSize, nil, fmt.Errorf("cannot write to a directory: %q", virtualPath)
+		}
+		if info.Mode().IsRegular() {
+			isFileOverwrite = true
+			truncatedSize = fileSize
+		}
+		numFiles = 0
+	}
+	if err != nil && !fs.IsNotExist(err) {
+		return nil, numFiles, truncatedSize, nil, conn.GetFsError(fs, err)
+	}
+	f, w, cancelFn, err := fs.Create(fsPath, 0)
+	if err != nil {
+		return nil, numFiles, truncatedSize, nil, conn.GetFsError(fs, err)
+	}
+	vfs.SetPathPermissions(fs, fsPath, conn.User.GetUID(), conn.User.GetGID())
+
+	if isFileOverwrite {
+		if vfs.HasTruncateSupport(fs) || vfs.IsCryptOsFs(fs) {
+			updateUserQuotaAfterFileWrite(conn, virtualPath, numFiles, -fileSize)
+			truncatedSize = 0
+		}
+	}
+	if cancelFn == nil {
+		cancelFn = func() {}
+	}
+	if f != nil {
+		return f, numFiles, truncatedSize, cancelFn, nil
+	}
+	return w, numFiles, truncatedSize, cancelFn, nil
+}
+
+func addZipEntry(wr *zipWriterWrapper, conn *BaseConnection, entryPath, baseDir string) error {
+	if entryPath == wr.Name {
+		// skip the archive itself
+		return nil
+	}
+	info, err := conn.DoStat(entryPath, 1, false)
+	if err != nil {
+		eventManagerLog(logger.LevelError, "unable to add zip entry %#v, stat error: %v", entryPath, err)
+		return err
+	}
+	entryName, err := getZipEntryName(entryPath, baseDir)
+	if err != nil {
+		eventManagerLog(logger.LevelError, "unable to get zip entry name: %v", err)
+		return err
+	}
+	if _, ok := wr.Entries[entryName]; ok {
+		eventManagerLog(logger.LevelInfo, "skipping duplicate zip entry %q, is dir %t", entryPath, info.IsDir())
+		return nil
+	}
+	wr.Entries[entryName] = true
+	if info.IsDir() {
+		_, err = wr.Writer.CreateHeader(&zip.FileHeader{
+			Name:     entryName + "/",
+			Method:   zip.Deflate,
+			Modified: info.ModTime(),
+		})
+		if err != nil {
+			eventManagerLog(logger.LevelError, "unable to create zip entry %q: %v", entryPath, err)
+			return fmt.Errorf("unable to create zip entry %q: %w", entryPath, err)
+		}
+		contents, err := conn.ListDir(entryPath)
+		if err != nil {
+			eventManagerLog(logger.LevelError, "unable to add zip entry %q, read dir error: %v", entryPath, err)
+			return fmt.Errorf("unable to add zip entry %q: %w", entryPath, err)
+		}
+		for _, info := range contents {
+			fullPath := util.CleanPath(path.Join(entryPath, info.Name()))
+			if err := addZipEntry(wr, conn, fullPath, baseDir); err != nil {
+				eventManagerLog(logger.LevelError, "unable to add zip entry: %v", err)
+				return err
+			}
+		}
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		// we only allow regular files
+		eventManagerLog(logger.LevelInfo, "skipping zip entry for non regular file %q", entryPath)
+		return nil
+	}
+	reader, cancelFn, err := getFileReader(conn, entryPath)
+	if err != nil {
+		eventManagerLog(logger.LevelError, "unable to add zip entry %q, cannot open file: %v", entryPath, err)
+		return fmt.Errorf("unable to open %q: %w", entryPath, err)
+	}
+	defer cancelFn()
+	defer reader.Close()
+
+	f, err := wr.Writer.CreateHeader(&zip.FileHeader{
+		Name:     entryName,
+		Method:   zip.Deflate,
+		Modified: info.ModTime(),
+	})
+	if err != nil {
+		eventManagerLog(logger.LevelError, "unable to create zip entry %q: %v", entryPath, err)
+		return fmt.Errorf("unable to create zip entry %q: %w", entryPath, err)
+	}
+	_, err = io.Copy(f, reader)
+	return err
+}
+
+func getZipEntryName(entryPath, baseDir string) (string, error) {
+	if !strings.HasPrefix(entryPath, baseDir) {
+		return "", fmt.Errorf("entry path %q is outside base dir %q", entryPath, baseDir)
+	}
+	entryPath = strings.TrimPrefix(entryPath, baseDir)
+	return strings.TrimPrefix(entryPath, "/"), nil
+}
+
 func getFileReader(conn *BaseConnection, virtualPath string) (io.ReadCloser, func(), error) {
 	fs, fsPath, err := conn.GetFsAndResolvedPath(virtualPath)
 	if err != nil {
@@ -628,7 +783,7 @@ func getFileReader(conn *BaseConnection, virtualPath string) (io.ReadCloser, fun
 	}
 	f, r, cancelFn, err := fs.Open(fsPath, 0)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, conn.GetFsError(fs, err)
 	}
 	if cancelFn == nil {
 		cancelFn = func() {}
@@ -681,8 +836,7 @@ func getMailAttachments(user dataprovider.User, attachments []string, replacer *
 	}
 	conn := NewBaseConnection(connectionID, protocolEventAction, "", "", user)
 	totalSize := int64(0)
-	for _, virtualPath := range attachments {
-		virtualPath = util.CleanPath(replaceWithReplacer(virtualPath, replacer))
+	for _, virtualPath := range replacePathsPlaceholders(attachments, replacer) {
 		info, err := conn.DoStat(virtualPath, 0, false)
 		if err != nil {
 			return nil, fmt.Errorf("unable to get info for file %q, user %q: %w", virtualPath, conn.User.Username, err)
@@ -948,7 +1102,6 @@ func executeHTTPRuleAction(c dataprovider.EventActionHTTPConfig, params *EventPa
 }
 
 func executeCommandRuleAction(c dataprovider.EventActionCommandConfig, params *EventParams) error {
-	envVars := make([]string, 0, len(c.EnvVars))
 	addObjectData := false
 	if params.Object != nil {
 		for _, k := range c.EnvVars {
@@ -960,9 +1113,7 @@ func executeCommandRuleAction(c dataprovider.EventActionCommandConfig, params *E
 	}
 	replacements := params.getStringReplacements(addObjectData)
 	replacer := strings.NewReplacer(replacements...)
-	for _, keyVal := range c.EnvVars {
-		envVars = append(envVars, fmt.Sprintf("%s=%s", keyVal.Key, replaceWithReplacer(keyVal.Value, replacer)))
-	}
+
 	args := make([]string, 0, len(c.Args))
 	for _, arg := range c.Args {
 		args = append(args, replaceWithReplacer(arg, replacer))
@@ -972,8 +1123,10 @@ func executeCommandRuleAction(c dataprovider.EventActionCommandConfig, params *E
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, c.Cmd, args...)
-	cmd.Env = append(cmd.Env, os.Environ()...)
-	cmd.Env = append(cmd.Env, envVars...)
+	cmd.Env = []string{}
+	for _, keyVal := range c.EnvVars {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", keyVal.Key, replaceWithReplacer(keyVal.Value, replacer)))
+	}
 
 	startTime := time.Now()
 	err := cmd.Run()
@@ -1035,12 +1188,24 @@ func getUserForEventAction(user dataprovider.User) (dataprovider.User, error) {
 		eventManagerLog(logger.LevelError, "unable to get group for user %q: %+v", user.Username, err)
 		return dataprovider.User{}, fmt.Errorf("unable to get groups for user %q", user.Username)
 	}
+	user.UploadDataTransfer = 0
+	user.UploadBandwidth = 0
+	user.DownloadBandwidth = 0
 	user.Filters.DisableFsChecks = false
 	user.Filters.FilePatterns = nil
+	user.Filters.BandwidthLimits = nil
+	user.Filters.DataTransferLimits = nil
 	for k := range user.Permissions {
 		user.Permissions[k] = []string{dataprovider.PermAny}
 	}
 	return user, nil
+}
+
+func replacePathsPlaceholders(paths []string, replacer *strings.Replacer) []string {
+	for idx := range paths {
+		paths[idx] = util.CleanPath(replaceWithReplacer(paths[idx], replacer))
+	}
+	return util.RemoveDuplicates(paths, false)
 }
 
 func executeDeleteFileFsAction(conn *BaseConnection, item string, info os.FileInfo) error {
@@ -1063,8 +1228,7 @@ func executeDeleteFsActionForUser(deletes []string, replacer *strings.Replacer, 
 		return fmt.Errorf("delete error, unable to check root fs for user %q: %w", user.Username, err)
 	}
 	conn := NewBaseConnection(connectionID, protocolEventAction, "", "", user)
-	for _, item := range deletes {
-		item = util.CleanPath(replaceWithReplacer(item, replacer))
+	for _, item := range replacePathsPlaceholders(deletes, replacer) {
 		info, err := conn.DoStat(item, 0, false)
 		if err != nil {
 			if conn.IsNotExistError(err) {
@@ -1138,8 +1302,7 @@ func executeMkDirsFsActionForUser(dirs []string, replacer *strings.Replacer, use
 		return fmt.Errorf("mkdir error, unable to check root fs for user %q: %w", user.Username, err)
 	}
 	conn := NewBaseConnection(connectionID, protocolEventAction, "", "", user)
-	for _, item := range dirs {
-		item = util.CleanPath(replaceWithReplacer(item, replacer))
+	for _, item := range replacePathsPlaceholders(dirs, replacer) {
 		if err = conn.CheckParentDirs(path.Dir(item)); err != nil {
 			return fmt.Errorf("unable to check parent dirs for %q, user %q: %w", item, user.Username, err)
 		}
@@ -1229,8 +1392,7 @@ func executeExistFsActionForUser(exist []string, replacer *strings.Replacer,
 		return fmt.Errorf("existence check error, unable to check root fs for user %q: %w", user.Username, err)
 	}
 	conn := NewBaseConnection(connectionID, protocolEventAction, "", "", user)
-	for _, item := range exist {
-		item = util.CleanPath(replaceWithReplacer(item, replacer))
+	for _, item := range replacePathsPlaceholders(exist, replacer) {
 		if _, err = conn.DoStat(item, 0, false); err != nil {
 			return fmt.Errorf("error checking existence for path %q, user %q: %w", item, user.Username, err)
 		}
@@ -1279,6 +1441,72 @@ func executeRenameFsRuleAction(renames []dataprovider.KeyValue, replacer *string
 	return nil
 }
 
+func getArchiveBaseDir(paths []string) string {
+	var parentDirs []string
+	for _, p := range paths {
+		parentDirs = append(parentDirs, path.Dir(p))
+	}
+	parentDirs = util.RemoveDuplicates(parentDirs, false)
+	baseDir := "/"
+	if len(parentDirs) == 1 {
+		baseDir = parentDirs[0]
+	}
+	return baseDir
+}
+
+func executeCompressFsActionForUser(c dataprovider.EventActionFsCompress, replacer *strings.Replacer,
+	user dataprovider.User,
+) error {
+	user, err := getUserForEventAction(user)
+	if err != nil {
+		return err
+	}
+	connectionID := fmt.Sprintf("%s_%s", protocolEventAction, xid.New().String())
+	err = user.CheckFsRoot(connectionID)
+	defer user.CloseFs() //nolint:errcheck
+	if err != nil {
+		return fmt.Errorf("compress error, unable to check root fs for user %q: %w", user.Username, err)
+	}
+	conn := NewBaseConnection(connectionID, protocolEventAction, "", "", user)
+	name := util.CleanPath(replaceWithReplacer(c.Name, replacer))
+	paths := make([]string, 0, len(c.Paths))
+	for idx := range c.Paths {
+		p := util.CleanPath(replaceWithReplacer(c.Paths[idx], replacer))
+		if p == name {
+			return fmt.Errorf("cannot compress the archive to create: %q", name)
+		}
+		paths = append(paths, p)
+	}
+	writer, numFiles, truncatedSize, cancelFn, err := getFileWriter(conn, name)
+	if err != nil {
+		eventManagerLog(logger.LevelError, "unable to create archive %q: %v", name, err)
+		return fmt.Errorf("unable to create archive: %w", err)
+	}
+	defer cancelFn()
+
+	paths = util.RemoveDuplicates(paths, false)
+	baseDir := getArchiveBaseDir(paths)
+	eventManagerLog(logger.LevelDebug, "creating archive %q for paths %+v", name, paths)
+
+	zipWriter := &zipWriterWrapper{
+		Name:    name,
+		Writer:  zip.NewWriter(writer),
+		Entries: make(map[string]bool),
+	}
+	for _, item := range paths {
+		if err := addZipEntry(zipWriter, conn, item, baseDir); err != nil {
+			closeWriterAndUpdateQuota(writer, conn, name, numFiles, truncatedSize, err) //nolint:errcheck
+			return err
+		}
+	}
+	if err := zipWriter.Writer.Close(); err != nil {
+		eventManagerLog(logger.LevelError, "unable to close zip file %q: %v", name, err)
+		closeWriterAndUpdateQuota(writer, conn, name, numFiles, truncatedSize, err) //nolint:errcheck
+		return fmt.Errorf("unable to close zip file %q: %w", name, err)
+	}
+	return closeWriterAndUpdateQuota(writer, conn, name, numFiles, truncatedSize, err)
+}
+
 func executeExistFsRuleAction(exist []string, replacer *strings.Replacer, conditions dataprovider.ConditionOptions,
 	params *EventParams,
 ) error {
@@ -1319,6 +1547,46 @@ func executeExistFsRuleAction(exist []string, replacer *strings.Replacer, condit
 	return nil
 }
 
+func executeCompressFsRuleAction(c dataprovider.EventActionFsCompress, replacer *strings.Replacer,
+	conditions dataprovider.ConditionOptions, params *EventParams,
+) error {
+	users, err := params.getUsers()
+	if err != nil {
+		return fmt.Errorf("unable to get users: %w", err)
+	}
+	var failures []string
+	executed := 0
+	for _, user := range users {
+		// if sender is set, the conditions have already been evaluated
+		if params.sender == "" {
+			if !checkEventConditionPatterns(user.Username, conditions.Names) {
+				eventManagerLog(logger.LevelDebug, "skipping fs compress for user %s, name conditions don't match",
+					user.Username)
+				continue
+			}
+			if !checkEventGroupConditionPatters(user.Groups, conditions.GroupNames) {
+				eventManagerLog(logger.LevelDebug, "skipping fs compress for user %s, group name conditions don't match",
+					user.Username)
+				continue
+			}
+		}
+		executed++
+		if err = executeCompressFsActionForUser(c, replacer, user); err != nil {
+			failures = append(failures, user.Username)
+			params.AddError(err)
+			continue
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("fs compress failed for users: %+v", failures)
+	}
+	if executed == 0 {
+		eventManagerLog(logger.LevelError, "no file/folder compressed")
+		return errors.New("no file/folder compressed")
+	}
+	return nil
+}
+
 func executeFsRuleAction(c dataprovider.EventActionFilesystemConfig, conditions dataprovider.ConditionOptions,
 	params *EventParams,
 ) error {
@@ -1334,6 +1602,8 @@ func executeFsRuleAction(c dataprovider.EventActionFilesystemConfig, conditions 
 		return executeMkdirFsRuleAction(c.MkDirs, replacer, conditions, params)
 	case dataprovider.FilesystemActionExist:
 		return executeExistFsRuleAction(c.Exist, replacer, conditions, params)
+	case dataprovider.FilesystemActionCompress:
+		return executeCompressFsRuleAction(c.Compress, replacer, conditions, params)
 	default:
 		return fmt.Errorf("unsupported filesystem action %d", c.Type)
 	}
@@ -1561,7 +1831,66 @@ func executeDataRetentionCheckRuleAction(config dataprovider.EventActionDataRete
 	return nil
 }
 
-func executeRuleAction(action dataprovider.BaseEventAction, params *EventParams, conditions dataprovider.ConditionOptions) error {
+func executeMetadataCheckForUser(user dataprovider.User) error {
+	if err := user.LoadAndApplyGroupSettings(); err != nil {
+		eventManagerLog(logger.LevelDebug, "skipping scheduled quota reset for user %s, cannot apply group settings: %v",
+			user.Username, err)
+		return err
+	}
+	if !ActiveMetadataChecks.Add(user.Username) {
+		eventManagerLog(logger.LevelError, "another metadata check is already in progress for user %q", user.Username)
+		return fmt.Errorf("another metadata check is in progress for user %q", user.Username)
+	}
+	defer ActiveMetadataChecks.Remove(user.Username)
+
+	if err := user.CheckMetadataConsistency(); err != nil {
+		eventManagerLog(logger.LevelError, "error checking metadata consistence for user %q: %v", user.Username, err)
+		return fmt.Errorf("error checking metadata consistence for user %q: %w", user.Username, err)
+	}
+	return nil
+}
+
+func executeMetadataCheckRuleAction(conditions dataprovider.ConditionOptions, params *EventParams) error {
+	users, err := params.getUsers()
+	if err != nil {
+		return fmt.Errorf("unable to get users: %w", err)
+	}
+	var failures []string
+	var executed int
+	for _, user := range users {
+		// if sender is set, the conditions have already been evaluated
+		if params.sender == "" {
+			if !checkEventConditionPatterns(user.Username, conditions.Names) {
+				eventManagerLog(logger.LevelDebug, "skipping metadata check for user %q, name conditions don't match",
+					user.Username)
+				continue
+			}
+			if !checkEventGroupConditionPatters(user.Groups, conditions.GroupNames) {
+				eventManagerLog(logger.LevelDebug, "skipping metadata check for user %q, group name conditions don't match",
+					user.Username)
+				continue
+			}
+		}
+		executed++
+		if err = executeMetadataCheckForUser(user); err != nil {
+			params.AddError(err)
+			failures = append(failures, user.Username)
+			continue
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("metadata check failed for users: %+v", failures)
+	}
+	if executed == 0 {
+		eventManagerLog(logger.LevelError, "no metadata check executed")
+		return errors.New("no metadata check executed")
+	}
+	return nil
+}
+
+func executeRuleAction(action dataprovider.BaseEventAction, params *EventParams,
+	conditions dataprovider.ConditionOptions,
+) error {
 	var err error
 
 	switch action.Type {
@@ -1581,6 +1910,8 @@ func executeRuleAction(action dataprovider.BaseEventAction, params *EventParams,
 		err = executeTransferQuotaResetRuleAction(conditions, params)
 	case dataprovider.ActionTypeDataRetentionCheck:
 		err = executeDataRetentionCheckRuleAction(action.Options.RetentionConfig, conditions, params, action.Name)
+	case dataprovider.ActionTypeMetadataCheck:
+		err = executeMetadataCheckRuleAction(conditions, params)
 	case dataprovider.ActionTypeFilesystem:
 		err = executeFsRuleAction(action.Options.FsConfig, conditions, params)
 	default:
@@ -1755,6 +2086,12 @@ func (j *eventCronJob) Run() {
 		executeAsyncRulesActions([]dataprovider.EventRule{rule}, EventParams{Status: 1, updateStatusFromError: true})
 	}
 	eventManagerLog(logger.LevelDebug, "execution for scheduled rule %q finished", j.ruleName)
+}
+
+type zipWriterWrapper struct {
+	Name    string
+	Entries map[string]bool
+	Writer  *zip.Writer
 }
 
 func eventManagerLog(level logger.LogLevel, format string, v ...any) {

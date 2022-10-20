@@ -44,12 +44,13 @@ const (
 	ActionTypeTransferQuotaReset
 	ActionTypeDataRetentionCheck
 	ActionTypeFilesystem
+	ActionTypeMetadataCheck
 )
 
 var (
-	supportedEventActions = []int{ActionTypeHTTP, ActionTypeCommand, ActionTypeEmail, ActionTypeBackup,
-		ActionTypeUserQuotaReset, ActionTypeFolderQuotaReset, ActionTypeTransferQuotaReset,
-		ActionTypeDataRetentionCheck, ActionTypeFilesystem}
+	supportedEventActions = []int{ActionTypeHTTP, ActionTypeCommand, ActionTypeEmail, ActionTypeFilesystem,
+		ActionTypeBackup, ActionTypeUserQuotaReset, ActionTypeFolderQuotaReset, ActionTypeTransferQuotaReset,
+		ActionTypeDataRetentionCheck, ActionTypeMetadataCheck}
 )
 
 func isActionTypeValid(action int) bool {
@@ -72,6 +73,8 @@ func getActionTypeAsString(action int) string {
 		return "Transfer quota reset"
 	case ActionTypeDataRetentionCheck:
 		return "Data retention check"
+	case ActionTypeMetadataCheck:
+		return "Metadata check"
 	case ActionTypeFilesystem:
 		return "Filesystem"
 	default:
@@ -120,6 +123,7 @@ const (
 	FilesystemActionDelete
 	FilesystemActionMkdirs
 	FilesystemActionExist
+	FilesystemActionCompress
 )
 
 const (
@@ -129,7 +133,7 @@ const (
 
 var (
 	supportedFsActions = []int{FilesystemActionRename, FilesystemActionDelete, FilesystemActionMkdirs,
-		FilesystemActionExist}
+		FilesystemActionCompress, FilesystemActionExist}
 )
 
 func isFilesystemActionValid(value int) bool {
@@ -144,6 +148,8 @@ func getFsActionTypeAsString(value int) string {
 		return "Delete"
 	case FilesystemActionExist:
 		return "Paths exist"
+	case FilesystemActionCompress:
+		return "Compress"
 	default:
 		return "Create directories"
 	}
@@ -536,6 +542,36 @@ func (c *EventActionDataRetentionConfig) validate() error {
 	return nil
 }
 
+// EventActionFsCompress defines the configuration for the compress filesystem action
+type EventActionFsCompress struct {
+	// Archive path
+	Name string `json:"name,omitempty"`
+	// Paths to compress
+	Paths []string `json:"paths,omitempty"`
+}
+
+func (c *EventActionFsCompress) validate() error {
+	if c.Name == "" {
+		return util.NewValidationError("archive name is mandatory")
+	}
+	c.Name = util.CleanPath(strings.TrimSpace(c.Name))
+	if c.Name == "/" {
+		return util.NewValidationError("invalid archive name")
+	}
+	if len(c.Paths) == 0 {
+		return util.NewValidationError("no path to compress specified")
+	}
+	for idx, val := range c.Paths {
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return util.NewValidationError("invalid path to compress")
+		}
+		c.Paths[idx] = util.CleanPath(val)
+	}
+	c.Paths = util.RemoveDuplicates(c.Paths, false)
+	return nil
+}
+
 // EventActionFilesystemConfig defines the configuration for filesystem actions
 type EventActionFilesystemConfig struct {
 	// Filesystem actions, see the above enum
@@ -548,6 +584,8 @@ type EventActionFilesystemConfig struct {
 	Deletes []string `json:"deletes,omitempty"`
 	// file/dirs to check for existence
 	Exist []string `json:"exist,omitempty"`
+	// paths to compress and archive name
+	Compress EventActionFsCompress `json:"compress"`
 }
 
 // GetDeletesAsString returns the list of items to delete as comma separated string.
@@ -566,6 +604,12 @@ func (c EventActionFilesystemConfig) GetMkDirsAsString() string {
 // Using a pointer receiver will not work in web templates
 func (c EventActionFilesystemConfig) GetExistAsString() string {
 	return strings.Join(c.Exist, ",")
+}
+
+// GetCompressPathsAsString returns the list of items to compress as comma separated string.
+// Using a pointer receiver will not work in web templates
+func (c EventActionFilesystemConfig) GetCompressPathsAsString() string {
+	return strings.Join(c.Compress.Paths, ",")
 }
 
 func (c *EventActionFilesystemConfig) validateRenames() error {
@@ -648,6 +692,7 @@ func (c *EventActionFilesystemConfig) validate() error {
 		c.MkDirs = nil
 		c.Deletes = nil
 		c.Exist = nil
+		c.Compress = EventActionFsCompress{}
 		if err := c.validateRenames(); err != nil {
 			return err
 		}
@@ -655,6 +700,7 @@ func (c *EventActionFilesystemConfig) validate() error {
 		c.Renames = nil
 		c.MkDirs = nil
 		c.Exist = nil
+		c.Compress = EventActionFsCompress{}
 		if err := c.validateDeletes(); err != nil {
 			return err
 		}
@@ -662,6 +708,7 @@ func (c *EventActionFilesystemConfig) validate() error {
 		c.Renames = nil
 		c.Deletes = nil
 		c.Exist = nil
+		c.Compress = EventActionFsCompress{}
 		if err := c.validateMkdirs(); err != nil {
 			return err
 		}
@@ -669,7 +716,16 @@ func (c *EventActionFilesystemConfig) validate() error {
 		c.Renames = nil
 		c.Deletes = nil
 		c.MkDirs = nil
+		c.Compress = EventActionFsCompress{}
 		if err := c.validateExist(); err != nil {
+			return err
+		}
+	case FilesystemActionCompress:
+		c.Renames = nil
+		c.MkDirs = nil
+		c.Deletes = nil
+		c.Exist = nil
+		if err := c.Compress.validate(); err != nil {
 			return err
 		}
 	}
@@ -683,6 +739,8 @@ func (c *EventActionFilesystemConfig) getACopy() EventActionFilesystemConfig {
 	copy(deletes, c.Deletes)
 	exist := make([]string, len(c.Exist))
 	copy(exist, c.Exist)
+	compressPaths := make([]string, len(c.Compress.Paths))
+	copy(compressPaths, c.Compress.Paths)
 
 	return EventActionFilesystemConfig{
 		Type:    c.Type,
@@ -690,6 +748,10 @@ func (c *EventActionFilesystemConfig) getACopy() EventActionFilesystemConfig {
 		MkDirs:  mkdirs,
 		Deletes: deletes,
 		Exist:   exist,
+		Compress: EventActionFsCompress{
+			Paths: compressPaths,
+			Name:  c.Compress.Name,
+		},
 	}
 }
 
@@ -1015,8 +1077,8 @@ func (f *ConditionOptions) validate() error {
 	}
 	if f.MinFileSize > 0 && f.MaxFileSize > 0 {
 		if f.MaxFileSize <= f.MinFileSize {
-			return util.NewValidationError(fmt.Sprintf("invalid max file size %d, it is lesser or equal than min file size %d",
-				f.MaxFileSize, f.MinFileSize))
+			return util.NewValidationError(fmt.Sprintf("invalid max file size %s, it is lesser or equal than min file size %s",
+				util.ByteCountSI(f.MaxFileSize), util.ByteCountSI(f.MinFileSize)))
 		}
 	}
 	if config.IsShared == 0 {
@@ -1257,7 +1319,7 @@ func (r *EventRule) validate() error {
 
 func (r *EventRule) checkIPBlockedAndCertificateActions() error {
 	unavailableActions := []int{ActionTypeUserQuotaReset, ActionTypeFolderQuotaReset, ActionTypeTransferQuotaReset,
-		ActionTypeDataRetentionCheck, ActionTypeFilesystem}
+		ActionTypeDataRetentionCheck, ActionTypeMetadataCheck, ActionTypeFilesystem}
 	for _, action := range r.Actions {
 		if util.Contains(unavailableActions, action.Type) {
 			return fmt.Errorf("action %q, type %q is not supported for event trigger %q",
@@ -1272,7 +1334,7 @@ func (r *EventRule) checkProviderEventActions(providerObjectType string) error {
 	// can be executed only if we modify a user. They will be executed for the
 	// affected user. Folder quota reset can be executed only for folders.
 	userSpecificActions := []int{ActionTypeUserQuotaReset, ActionTypeTransferQuotaReset,
-		ActionTypeDataRetentionCheck, ActionTypeFilesystem}
+		ActionTypeDataRetentionCheck, ActionTypeMetadataCheck, ActionTypeFilesystem}
 	for _, action := range r.Actions {
 		if util.Contains(userSpecificActions, action.Type) && providerObjectType != actionObjectUser {
 			return fmt.Errorf("action %q, type %q is only supported for provider user events",

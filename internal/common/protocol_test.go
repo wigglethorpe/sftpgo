@@ -35,9 +35,10 @@ import (
 	"time"
 
 	_ "github.com/go-sql-driver/mysql"
-	_ "github.com/lib/pq"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/mattn/go-sqlite3"
 	"github.com/mhale/smtpd"
+	"github.com/minio/sio"
 	"github.com/pkg/sftp"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -92,6 +93,7 @@ func TestMain(m *testing.M) {
 	logger.InitLogger(logFilePath, 5, 1, 28, false, false, zerolog.DebugLevel)
 
 	os.Setenv("SFTPGO_DATA_PROVIDER__CREATE_DEFAULT_ADMIN", "1")
+	os.Setenv("SFTPGO_COMMON__ALLOW_SELF_CONNECTIONS", "1")
 	os.Setenv("SFTPGO_DEFAULT_ADMIN_USERNAME", "admin")
 	os.Setenv("SFTPGO_DEFAULT_ADMIN_PASSWORD", "password")
 	err := config.LoadConfig(configDir, "")
@@ -313,6 +315,71 @@ func TestBaseConnection(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestRelativeSymlinks(t *testing.T) {
+	u := getTestUser()
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		linkName := testFileName + "_link"
+		err = client.Symlink("non-existent-file", linkName)
+		assert.NoError(t, err)
+		err = client.Remove(linkName)
+		assert.NoError(t, err)
+		testDir := "sub"
+		err = client.Mkdir(testDir)
+		assert.NoError(t, err)
+		f, err := client.Create(path.Join(testDir, testFileName))
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.NoError(t, err)
+		err = client.Symlink(path.Join(testDir, testFileName), linkName)
+		assert.NoError(t, err)
+		_, err = client.Stat(linkName)
+		assert.NoError(t, err)
+		p, err := client.ReadLink(linkName)
+		assert.NoError(t, err)
+		assert.Equal(t, path.Join("/", testDir, testFileName), p)
+		err = client.Remove(linkName)
+		assert.NoError(t, err)
+
+		err = client.Symlink(testFileName, path.Join(testDir, linkName))
+		assert.NoError(t, err)
+		_, err = client.Stat(path.Join(testDir, linkName))
+		assert.NoError(t, err)
+		p, err = client.ReadLink(path.Join(testDir, linkName))
+		assert.NoError(t, err)
+		assert.Equal(t, path.Join("/", testDir, testFileName), p)
+
+		f, err = client.Create(testFileName)
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.NoError(t, err)
+
+		err = client.Symlink(testFileName, linkName)
+		assert.NoError(t, err)
+		_, err = client.Stat(linkName)
+		assert.NoError(t, err)
+		p, err = client.ReadLink(linkName)
+		assert.NoError(t, err)
+		assert.Equal(t, path.Join("/", testFileName), p)
+	}
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
 func TestCheckFsAfterUpdate(t *testing.T) {
 	u := getTestUser()
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
@@ -407,6 +474,71 @@ func TestSetStat(t *testing.T) {
 		err = client.Chmod(testFileName, newPerm)
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	}
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
+func TestCryptFsUserUploadErrorOverwrite(t *testing.T) {
+	u := getCryptFsUser()
+	u.QuotaSize = 6000
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	var buf []byte
+	for i := 0; i < 4000; i++ {
+		buf = append(buf, []byte("a")...)
+	}
+	bufSize := int64(len(buf))
+	reader := bytes.NewReader(buf)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		f, err := client.Create(testFileName + "_big")
+		assert.NoError(t, err)
+		n, err := io.Copy(f, reader)
+		assert.NoError(t, err)
+		assert.Equal(t, bufSize, n)
+		err = f.Close()
+		assert.NoError(t, err)
+		encryptedSize, err := getEncryptedFileSize(bufSize)
+		assert.NoError(t, err)
+		expectedSize := encryptedSize
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, user.UsedQuotaFiles)
+		assert.Equal(t, expectedSize, user.UsedQuotaSize)
+		// now write a small file
+		f, err = client.Create(testFileName)
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.NoError(t, err)
+		encryptedSize, err = getEncryptedFileSize(int64(len(testFileContent)))
+		assert.NoError(t, err)
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Equal(t, 2, user.UsedQuotaFiles)
+		assert.Equal(t, expectedSize+encryptedSize, user.UsedQuotaSize)
+		// try to overwrite this file with a big one, this cause an overquota error
+		// the partial file is deleted and the quota updated
+		_, err = reader.Seek(0, io.SeekStart)
+		assert.NoError(t, err)
+		f, err = client.Create(testFileName)
+		assert.NoError(t, err)
+		_, err = io.Copy(f, reader)
+		assert.Error(t, err)
+		err = f.Close()
+		assert.Error(t, err)
+		user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Equal(t, 1, user.UsedQuotaFiles)
+		assert.Equal(t, expectedSize, user.UsedQuotaSize)
+	}
+
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
@@ -2264,19 +2396,19 @@ func TestVirtualFoldersLink(t *testing.T) {
 		assert.NoError(t, err)
 		err = client.Symlink(path.Join(vdirPath2, testFileName), path.Join(vdirPath2, testDir, testFileName+".link"))
 		assert.NoError(t, err)
-		err = client.Symlink(testFileName, path.Join(vdirPath1, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath1, testFileName+".link1"))
 		if assert.Error(t, err) {
 			assert.Contains(t, err.Error(), "SSH_FX_OP_UNSUPPORTED")
 		}
-		err = client.Symlink(testFileName, path.Join(vdirPath1, testDir, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath1, testDir, testFileName+".link1"))
 		if assert.Error(t, err) {
 			assert.Contains(t, err.Error(), "SSH_FX_OP_UNSUPPORTED")
 		}
-		err = client.Symlink(testFileName, path.Join(vdirPath2, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath2, testFileName+".link1"))
 		if assert.Error(t, err) {
 			assert.Contains(t, err.Error(), "SSH_FX_OP_UNSUPPORTED")
 		}
-		err = client.Symlink(testFileName, path.Join(vdirPath2, testDir, testFileName+".link1"))
+		err = client.Symlink(path.Join("/", testFileName), path.Join(vdirPath2, testDir, testFileName+".link1"))
 		if assert.Error(t, err) {
 			assert.Contains(t, err.Error(), "SSH_FX_OP_UNSUPPORTED")
 		}
@@ -4043,6 +4175,385 @@ func TestEventActionHTTPMultipart(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestEventActionCompress(t *testing.T) {
+	a1 := dataprovider.BaseEventAction{
+		Name: "action1",
+		Type: dataprovider.ActionTypeFilesystem,
+		Options: dataprovider.BaseEventActionOptions{
+			FsConfig: dataprovider.EventActionFilesystemConfig{
+				Type: dataprovider.FilesystemActionCompress,
+				Compress: dataprovider.EventActionFsCompress{
+					Name:  "/{{VirtualPath}}.zip",
+					Paths: []string{"/{{VirtualPath}}"},
+				},
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	r1 := dataprovider.EventRule{
+		Name:    "test compress",
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"upload"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+				Options: dataprovider.EventActionOptions{
+					ExecuteSync: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	u := getTestUser()
+	u.QuotaFiles = 1000
+	localUser, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	u = getTestSFTPUser()
+	u.FsConfig.SFTPConfig.BufferSize = 1
+	u.QuotaFiles = 1000
+	sftpUser, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	u = getCryptFsUser()
+	u.QuotaFiles = 1000
+	cryptFsUser, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	for _, user := range []dataprovider.User{localUser, sftpUser, cryptFsUser} {
+		// cleanup home dir
+		err = os.RemoveAll(user.GetHomeDir())
+		assert.NoError(t, err)
+		rule1.Conditions.Options.Names = []dataprovider.ConditionPattern{
+			{
+				Pattern: user.Username,
+			},
+		}
+		_, _, err = httpdtest.UpdateEventRule(rule1, http.StatusOK)
+		assert.NoError(t, err)
+
+		conn, client, err := getSftpClient(user)
+		if assert.NoError(t, err) {
+			defer conn.Close()
+			defer client.Close()
+
+			expectedQuotaSize := int64(len(testFileContent))
+			expectedQuotaFiles := 1
+			if user.Username == cryptFsUser.Username {
+				encryptedFileSize, err := getEncryptedFileSize(expectedQuotaSize)
+				assert.NoError(t, err)
+				expectedQuotaSize = encryptedFileSize
+			}
+
+			f, err := client.Create(testFileName)
+			assert.NoError(t, err)
+			_, err = f.Write(testFileContent)
+			assert.NoError(t, err)
+			err = f.Close()
+			assert.NoError(t, err)
+			info, err := client.Stat(testFileName + ".zip")
+			if assert.NoError(t, err) {
+				assert.Greater(t, info.Size(), int64(0))
+				// check quota
+				archiveSize := info.Size()
+				if user.Username == cryptFsUser.Username {
+					encryptedFileSize, err := getEncryptedFileSize(archiveSize)
+					assert.NoError(t, err)
+					archiveSize = encryptedFileSize
+				}
+				user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+				assert.NoError(t, err)
+				assert.Equal(t, expectedQuotaFiles+1, user.UsedQuotaFiles,
+					"quota file does no match for user %q", user.Username)
+				assert.Equal(t, expectedQuotaSize+archiveSize, user.UsedQuotaSize,
+					"quota size does no match for user %q", user.Username)
+			}
+			// now overwrite the same file
+			f, err = client.Create(testFileName)
+			assert.NoError(t, err)
+			_, err = f.Write(testFileContent)
+			assert.NoError(t, err)
+			err = f.Close()
+			assert.NoError(t, err)
+			info, err = client.Stat(testFileName + ".zip")
+			if assert.NoError(t, err) {
+				assert.Greater(t, info.Size(), int64(0))
+				archiveSize := info.Size()
+				if user.Username == cryptFsUser.Username {
+					encryptedFileSize, err := getEncryptedFileSize(archiveSize)
+					assert.NoError(t, err)
+					archiveSize = encryptedFileSize
+				}
+				user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+				assert.NoError(t, err)
+				assert.Equal(t, expectedQuotaFiles+1, user.UsedQuotaFiles,
+					"quota file after overwrite does no match for user %q", user.Username)
+				assert.Equal(t, expectedQuotaSize+archiveSize, user.UsedQuotaSize,
+					"quota size after overwrite does no match for user %q", user.Username)
+			}
+		}
+		if user.Username == localUser.Username {
+			err = os.RemoveAll(user.GetHomeDir())
+			assert.NoError(t, err)
+		}
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(sftpUser, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(localUser, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(localUser.GetHomeDir())
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(cryptFsUser, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(cryptFsUser.GetHomeDir())
+	assert.NoError(t, err)
+}
+
+func TestEventActionCompressQuotaFolder(t *testing.T) {
+	testDir := "/folder"
+	a1 := dataprovider.BaseEventAction{
+		Name: "action1",
+		Type: dataprovider.ActionTypeFilesystem,
+		Options: dataprovider.BaseEventActionOptions{
+			FsConfig: dataprovider.EventActionFilesystemConfig{
+				Type: dataprovider.FilesystemActionCompress,
+				Compress: dataprovider.EventActionFsCompress{
+					Name:  "/{{VirtualPath}}.zip",
+					Paths: []string{"/{{VirtualPath}}", testDir},
+				},
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	r1 := dataprovider.EventRule{
+		Name:    "test compress",
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"upload"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+				Options: dataprovider.EventActionOptions{
+					ExecuteSync: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+	u := getTestUser()
+	u.QuotaFiles = 1000
+	mappedPath := filepath.Join(os.TempDir(), "virtualpath")
+	folderName := filepath.Base(mappedPath)
+	vdirPath := "/virtualpath"
+	u.VirtualFolders = append(u.VirtualFolders, vfs.VirtualFolder{
+		BaseVirtualFolder: vfs.BaseVirtualFolder{
+			Name:       folderName,
+			MappedPath: mappedPath,
+		},
+		VirtualPath: vdirPath,
+		QuotaSize:   -1,
+		QuotaFiles:  -1,
+	})
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		err = client.Mkdir(testDir)
+		assert.NoError(t, err)
+		expectedQuotaSize := int64(len(testFileContent))
+		expectedQuotaFiles := 1
+		err = client.Symlink(path.Join(testDir, testFileName), path.Join(testDir, testFileName+"_link"))
+		assert.NoError(t, err)
+		f, err := client.Create(path.Join(testDir, testFileName))
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.NoError(t, err)
+		info, err := client.Stat(path.Join(testDir, testFileName) + ".zip")
+		if assert.NoError(t, err) {
+			assert.Greater(t, info.Size(), int64(0))
+			user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+			assert.NoError(t, err)
+			expectedQuotaFiles++
+			expectedQuotaSize += info.Size()
+			assert.Equal(t, expectedQuotaFiles, user.UsedQuotaFiles)
+			assert.Equal(t, expectedQuotaSize, user.UsedQuotaSize)
+		}
+		vfolder, _, err := httpdtest.GetFolderByName(folderName, http.StatusOK)
+		assert.NoError(t, err)
+		assert.Equal(t, 0, vfolder.UsedQuotaFiles)
+		assert.Equal(t, int64(0), vfolder.UsedQuotaSize)
+		// upload in the virtual path
+		f, err = client.Create(path.Join(vdirPath, testFileName))
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.NoError(t, err)
+		info, err = client.Stat(path.Join(vdirPath, testFileName) + ".zip")
+		if assert.NoError(t, err) {
+			assert.Greater(t, info.Size(), int64(0))
+			user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
+			assert.NoError(t, err)
+			expectedQuotaFiles += 2
+			expectedQuotaSize += info.Size() + int64(len(testFileContent))
+			assert.Equal(t, expectedQuotaFiles, user.UsedQuotaFiles)
+			assert.Equal(t, expectedQuotaSize, user.UsedQuotaSize)
+			vfolder, _, err := httpdtest.GetFolderByName(folderName, http.StatusOK)
+			assert.NoError(t, err)
+			assert.Equal(t, 2, vfolder.UsedQuotaFiles)
+			assert.Equal(t, info.Size()+int64(len(testFileContent)), vfolder.UsedQuotaSize)
+		}
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: folderName}, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(mappedPath)
+	assert.NoError(t, err)
+}
+
+func TestEventActionCompressErrors(t *testing.T) {
+	a1 := dataprovider.BaseEventAction{
+		Name: "action1",
+		Type: dataprovider.ActionTypeFilesystem,
+		Options: dataprovider.BaseEventActionOptions{
+			FsConfig: dataprovider.EventActionFilesystemConfig{
+				Type: dataprovider.FilesystemActionCompress,
+				Compress: dataprovider.EventActionFsCompress{
+					Name:  "/{{VirtualPath}}.zip",
+					Paths: []string{"/{{VirtualPath}}.zip"}, // cannot compress itself
+				},
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	r1 := dataprovider.EventRule{
+		Name:    "test compress",
+		Trigger: dataprovider.EventTriggerFsEvent,
+		Conditions: dataprovider.EventConditions{
+			FsEvents: []string{"upload"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+				Options: dataprovider.EventActionOptions{
+					ExecuteSync: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
+	assert.NoError(t, err)
+	conn, client, err := getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		f, err := client.Create(testFileName)
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.Error(t, err)
+	}
+	// try to compress a missing file
+	action1.Options.FsConfig.Compress.Paths = []string{"/missing file"}
+	_, _, err = httpdtest.UpdateEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	conn, client, err = getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		f, err := client.Create(testFileName)
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.Error(t, err)
+	}
+	// try to overwrite a directory
+	testDir := "/adir"
+	action1.Options.FsConfig.Compress.Name = testDir
+	action1.Options.FsConfig.Compress.Paths = []string{"/{{VirtualPath}}"}
+	_, _, err = httpdtest.UpdateEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	conn, client, err = getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		err = client.Mkdir(testDir)
+		assert.NoError(t, err)
+		f, err := client.Create(testFileName)
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.Error(t, err)
+	}
+	// try to write to a missing directory
+	action1.Options.FsConfig.Compress.Name = "/subdir/missing/path/file.zip"
+	_, _, err = httpdtest.UpdateEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	conn, client, err = getSftpClient(user)
+	if assert.NoError(t, err) {
+		defer conn.Close()
+		defer client.Close()
+
+		f, err := client.Create(testFileName)
+		assert.NoError(t, err)
+		_, err = f.Write(testFileContent)
+		assert.NoError(t, err)
+		err = f.Close()
+		assert.Error(t, err)
+	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
 func TestEventActionEmailAttachments(t *testing.T) {
 	smtpCfg := smtp.Config{
 		Host:          "127.0.0.1",
@@ -4055,17 +4566,32 @@ func TestEventActionEmailAttachments(t *testing.T) {
 
 	a1 := dataprovider.BaseEventAction{
 		Name: "action1",
+		Type: dataprovider.ActionTypeFilesystem,
+		Options: dataprovider.BaseEventActionOptions{
+			FsConfig: dataprovider.EventActionFilesystemConfig{
+				Type: dataprovider.FilesystemActionCompress,
+				Compress: dataprovider.EventActionFsCompress{
+					Name:  "/{{VirtualPath}}.zip",
+					Paths: []string{"/{{VirtualPath}}"},
+				},
+			},
+		},
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	a2 := dataprovider.BaseEventAction{
+		Name: "action2",
 		Type: dataprovider.ActionTypeEmail,
 		Options: dataprovider.BaseEventActionOptions{
 			EmailConfig: dataprovider.EventActionEmailConfig{
 				Recipients:  []string{"test@example.com"},
 				Subject:     `"{{Event}}" from "{{Name}}"`,
 				Body:        "Fs path {{FsPath}}, size: {{FileSize}}, protocol: {{Protocol}}, IP: {{IP}}",
-				Attachments: []string{"/{{VirtualPath}}"},
+				Attachments: []string{"/{{VirtualPath}}.zip"},
 			},
 		},
 	}
-	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	action2, _, err := httpdtest.AddEventAction(a2, http.StatusCreated)
 	assert.NoError(t, err)
 	r1 := dataprovider.EventRule{
 		Name:    "test email with attachment",
@@ -4079,6 +4605,12 @@ func TestEventActionEmailAttachments(t *testing.T) {
 					Name: action1.Name,
 				},
 				Order: 1,
+			},
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action2.Name,
+				},
+				Order: 2,
 			},
 		},
 	}
@@ -4111,7 +4643,7 @@ func TestEventActionEmailAttachments(t *testing.T) {
 			email := lastReceivedEmail.get()
 			assert.Len(t, email.To, 1)
 			assert.True(t, util.Contains(email.To, "test@example.com"))
-			assert.Contains(t, email.Data, fmt.Sprintf(`Subject: "upload" from "%s"`, user.Username))
+			assert.Contains(t, email.Data, `Subject: "upload" from`)
 			assert.Contains(t, email.Data, "Content-Disposition: attachment")
 		}
 	}
@@ -4119,6 +4651,8 @@ func TestEventActionEmailAttachments(t *testing.T) {
 	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
 	assert.NoError(t, err)
 	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action2, http.StatusOK)
 	assert.NoError(t, err)
 	_, err = httpdtest.RemoveUser(sftpUser, http.StatusOK)
 	assert.NoError(t, err)
@@ -5345,6 +5879,15 @@ func TestSplittedRenamePerms(t *testing.T) {
 }
 
 func TestSFTPLoopError(t *testing.T) {
+	smtpCfg := smtp.Config{
+		Host:          "127.0.0.1",
+		Port:          2525,
+		From:          "notification@example.com",
+		TemplatesPath: "templates",
+	}
+	err := smtpCfg.Initialize(configDir)
+	require.NoError(t, err)
+
 	user1 := getTestUser()
 	user2 := getTestUser()
 	user1.Username += "1"
@@ -5381,6 +5924,63 @@ func TestSFTPLoopError(t *testing.T) {
 	assert.NoError(t, err, string(resp))
 	user2, resp, err = httpdtest.AddUser(user2, http.StatusCreated)
 	assert.NoError(t, err, string(resp))
+	// test metadata check event error
+	a1 := dataprovider.BaseEventAction{
+		Name: "a1",
+		Type: dataprovider.ActionTypeMetadataCheck,
+	}
+	action1, _, err := httpdtest.AddEventAction(a1, http.StatusCreated)
+	assert.NoError(t, err)
+	a2 := dataprovider.BaseEventAction{
+		Name: "a2",
+		Type: dataprovider.ActionTypeEmail,
+		Options: dataprovider.BaseEventActionOptions{
+			EmailConfig: dataprovider.EventActionEmailConfig{
+				Recipients: []string{"failure@example.com"},
+				Subject:    `Failed action"`,
+				Body:       "Test body",
+			},
+		},
+	}
+	action2, _, err := httpdtest.AddEventAction(a2, http.StatusCreated)
+	assert.NoError(t, err)
+	r1 := dataprovider.EventRule{
+		Name:    "rule1",
+		Trigger: dataprovider.EventTriggerProviderEvent,
+		Conditions: dataprovider.EventConditions{
+			ProviderEvents: []string{"update"},
+		},
+		Actions: []dataprovider.EventAction{
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action1.Name,
+				},
+				Order: 1,
+			},
+			{
+				BaseEventAction: dataprovider.BaseEventAction{
+					Name: action2.Name,
+				},
+				Order: 2,
+				Options: dataprovider.EventActionOptions{
+					IsFailureAction: true,
+				},
+			},
+		},
+	}
+	rule1, _, err := httpdtest.AddEventRule(r1, http.StatusCreated)
+	assert.NoError(t, err)
+
+	lastReceivedEmail.reset()
+	_, _, err = httpdtest.UpdateUser(user2, http.StatusOK, "")
+	assert.NoError(t, err)
+	assert.Eventually(t, func() bool {
+		return lastReceivedEmail.get().From != ""
+	}, 3000*time.Millisecond, 100*time.Millisecond)
+	email := lastReceivedEmail.get()
+	assert.Len(t, email.To, 1)
+	assert.True(t, util.Contains(email.To, "failure@example.com"))
+	assert.Contains(t, email.Data, `Subject: Failed action`)
 
 	user1.VirtualFolders[0].FsConfig.SFTPConfig.Password = kms.NewPlainSecret(defaultPassword)
 	user2.FsConfig.SFTPConfig.Password = kms.NewPlainSecret(defaultPassword)
@@ -5399,6 +5999,13 @@ func TestSFTPLoopError(t *testing.T) {
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "SFTP loop")
 	}
+
+	_, err = httpdtest.RemoveEventRule(rule1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action1, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveEventAction(action2, http.StatusOK)
+	assert.NoError(t, err)
 	_, err = httpdtest.RemoveUser(user1, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(user1.GetHomeDir())
@@ -5409,6 +6016,10 @@ func TestSFTPLoopError(t *testing.T) {
 	assert.NoError(t, err)
 	_, err = httpdtest.RemoveFolder(vfs.BaseVirtualFolder{Name: "sftp"}, http.StatusOK)
 	assert.NoError(t, err)
+
+	smtpCfg = smtp.Config{}
+	err = smtpCfg.Initialize(configDir)
+	require.NoError(t, err)
 }
 
 func TestNonLocalCrossRename(t *testing.T) {
@@ -5813,6 +6424,11 @@ func isDbDefenderSupported() bool {
 	default:
 		return false
 	}
+}
+
+func getEncryptedFileSize(size int64) (int64, error) {
+	encSize, err := sio.EncryptedSize(uint64(size))
+	return int64(encSize) + 33, err
 }
 
 func printLatestLogs(maxNumberOfLines int) {

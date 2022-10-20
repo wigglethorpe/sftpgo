@@ -27,7 +27,7 @@ info:
     SFTPGo supports groups to simplify the administration of multiple accounts by letting you assign settings once to a group, instead of multiple times to each individual user.
     The SFTPGo WebClient allows end users to change their credentials, browse and manage their files in the browser and setup two-factor authentication which works with Authy, Google Authenticator and other compatible apps.
     From the WebClient each authorized user can also create HTTP/S links to externally share files and folders securely, by setting limits to the number of downloads/uploads, protecting the share with a password, limiting access by source IP address, setting an automatic expiration date.
-  version: 2.3.5-dev
+  version: 2.3.6-dev
   contact:
     name: API support
     url: 'https://github.com/drakkan/sftpgo'
@@ -5227,6 +5227,12 @@ components:
           type: object
           additionalProperties: true
           description: 'This field is passed to the pre-login hook if custom OIDC token fields have been configured. Field values can be of any type (this is a free form object) and depend on the type of the configured OIDC token fields'
+    AdminPreferences:
+      type: object
+      properties:
+        hide_user_page_sections:
+          type: integer
+          description: 'Allow to hide some sections from the user page. These are not security settings and are not enforced server side in any way. They are only intended to simplify the user page in the WebAdmin UI. 1 means hide groups section, 2 means hide filesystem section, "users_base_dir" must be set in the config file otherwise this setting is ignored, 4 means hide virtual folders section, 8 means hide profile section, 16 means hide ACLs section, 32 means hide disk and bandwidth quota limits section, 64 means hide advanced settings section. The settings can be combined'
     AdminFilters:
       type: object
       properties:
@@ -5247,6 +5253,8 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/RecoveryCode'
+        preferences:
+          $ref: '#/components/schemas/AdminPreferences'
     Admin:
       type: object
       properties:
@@ -5451,6 +5459,9 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/Transfer'
+        node:
+          type: string
+          description: 'Node identifier, omitted for single node installations'
     FolderRetention:
       type: object
       properties:
@@ -6145,6 +6156,17 @@ components:
           type: array
           items:
             $ref: '#/components/schemas/FolderRetention'
+    EventActionFsCompress:
+      type: object
+      properties:
+        name:
+          type: string
+          description: 'Full path to the (zip) archive to create. The parent dir must exist'
+        paths:
+          type: array
+          items:
+            type: string
+          description: 'paths to add the archive'
     EventActionFilesystemConfig:
       type: object
       properties:
@@ -6166,6 +6188,8 @@ components:
           type: array
           items:
             type: string
+        compress:
+          $ref: '#/components/schemas/EventActionFsCompress'
     BaseEventActionOptions:
       type: object
       properties:

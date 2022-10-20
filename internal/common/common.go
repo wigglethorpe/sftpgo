@@ -117,6 +117,8 @@ func init() {
 		clients: make(map[string]int),
 	}
 	Connections.perUserConns = make(map[string]int)
+	Connections.mapping = make(map[string]int)
+	Connections.sshMapping = make(map[string]int)
 }
 
 // errors definitions
@@ -143,9 +145,11 @@ var (
 	// Connections is the list of active connections
 	Connections ActiveConnections
 	// QuotaScans is the list of active quota scans
-	QuotaScans         ActiveScans
-	transfersChecker   TransfersChecker
-	supportedProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
+	QuotaScans ActiveScans
+	// ActiveMetadataChecks holds the active metadata checks
+	ActiveMetadataChecks MetadataChecks
+	transfersChecker     TransfersChecker
+	supportedProtocols   = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP, ProtocolWebDAV,
 		ProtocolHTTP, ProtocolHTTPShare, ProtocolOIDC}
 	disconnHookProtocols = []string{ProtocolSFTP, ProtocolSCP, ProtocolSSH, ProtocolFTP}
 	// the map key is the protocol, for each protocol we can have multiple rate limiters
@@ -210,6 +214,8 @@ func Initialize(c Configuration, isShared int) error {
 	}
 	vfs.SetTempPath(c.TempPath)
 	dataprovider.SetTempPath(c.TempPath)
+	vfs.SetAllowSelfConnections(c.AllowSelfConnections)
+	dataprovider.SetAllowSelfConnections(c.AllowSelfConnections)
 	transfersChecker = getTransfersChecker(isShared)
 	return nil
 }
@@ -502,6 +508,9 @@ type Configuration struct {
 	// Only the listed IPs/networks can access the configured services, all other client connections
 	// will be dropped before they even try to authenticate.
 	WhiteListFile string `json:"whitelist_file" mapstructure:"whitelist_file"`
+	// Allow users on this instance to use other users/virtual folders on this instance as storage backend.
+	// Enable this setting if you know what you are doing.
+	AllowSelfConnections int `json:"allow_self_connections" mapstructure:"allow_self_connections"`
 	// Defender configuration
 	DefenderConfig DefenderConfig `json:"defender" mapstructure:"defender"`
 	// Rate limiter configurations
@@ -578,11 +587,11 @@ func (c *Configuration) ExecuteStartupHook() error {
 		return err
 	}
 	startTime := time.Now()
-	timeout, env := command.GetConfig(c.StartupHook)
+	timeout, env, args := command.GetConfig(c.StartupHook, command.HookStartup)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, c.StartupHook)
+	cmd := exec.CommandContext(ctx, c.StartupHook, args...)
 	cmd.Env = env
 	err := cmd.Run()
 	logger.Debug(logSender, "", "Startup hook executed, elapsed: %v, error: %v", time.Since(startTime), err)
@@ -624,12 +633,12 @@ func (c *Configuration) executePostDisconnectHook(remoteAddr, protocol, username
 		logger.Debug(protocol, connID, "invalid post disconnect hook %#v", c.PostDisconnectHook)
 		return
 	}
-	timeout, env := command.GetConfig(c.PostDisconnectHook)
+	timeout, env, args := command.GetConfig(c.PostDisconnectHook, command.HookPostDisconnect)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	startTime := time.Now()
-	cmd := exec.CommandContext(ctx, c.PostDisconnectHook)
+	cmd := exec.CommandContext(ctx, c.PostDisconnectHook, args...)
 	cmd.Env = append(env,
 		fmt.Sprintf("SFTPGO_CONNECTION_IP=%v", ipAddr),
 		fmt.Sprintf("SFTPGO_CONNECTION_USERNAME=%v", username),
@@ -684,11 +693,11 @@ func (c *Configuration) ExecutePostConnectHook(ipAddr, protocol string) error {
 		logger.Warn(protocol, "", "Login from ip %#v denied: %v", ipAddr, err)
 		return err
 	}
-	timeout, env := command.GetConfig(c.PostConnectHook)
+	timeout, env, args := command.GetConfig(c.PostConnectHook, command.HookPostConnect)
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, c.PostConnectHook)
+	cmd := exec.CommandContext(ctx, c.PostConnectHook, args...)
 	cmd.Env = append(env,
 		fmt.Sprintf("SFTPGO_CONNECTION_IP=%v", ipAddr),
 		fmt.Sprintf("SFTPGO_CONNECTION_PROTOCOL=%v", protocol))
@@ -745,7 +754,9 @@ type ActiveConnections struct {
 	transfersCheckStatus atomic.Bool
 	sync.RWMutex
 	connections    []ActiveConnection
+	mapping        map[string]int
 	sshConnections []*SSHConnection
+	sshMapping     map[string]int
 	perUserConns   map[string]int
 }
 
@@ -793,9 +804,10 @@ func (conns *ActiveConnections) Add(c ActiveConnection) error {
 		}
 		conns.addUserConnection(username)
 	}
+	conns.mapping[c.GetID()] = len(conns.connections)
 	conns.connections = append(conns.connections, c)
 	metric.UpdateActiveConnectionsSize(len(conns.connections))
-	logger.Debug(c.GetProtocol(), c.GetID(), "connection added, local address %#v, remote address %#v, num open connections: %v",
+	logger.Debug(c.GetProtocol(), c.GetID(), "connection added, local address %q, remote address %q, num open connections: %d",
 		c.GetLocalAddress(), c.GetRemoteAddress(), len(conns.connections))
 	return nil
 }
@@ -808,25 +820,25 @@ func (conns *ActiveConnections) Swap(c ActiveConnection) error {
 	conns.Lock()
 	defer conns.Unlock()
 
-	for idx, conn := range conns.connections {
-		if conn.GetID() == c.GetID() {
-			conns.removeUserConnection(conn.GetUsername())
-			if username := c.GetUsername(); username != "" {
-				if maxSessions := c.GetMaxSessions(); maxSessions > 0 {
-					if val := conns.perUserConns[username]; val >= maxSessions {
-						conns.addUserConnection(conn.GetUsername())
-						return fmt.Errorf("too many open sessions: %d/%d", val, maxSessions)
-					}
+	if idx, ok := conns.mapping[c.GetID()]; ok {
+		conn := conns.connections[idx]
+		conns.removeUserConnection(conn.GetUsername())
+		if username := c.GetUsername(); username != "" {
+			if maxSessions := c.GetMaxSessions(); maxSessions > 0 {
+				if val, ok := conns.perUserConns[username]; ok && val >= maxSessions {
+					conns.addUserConnection(conn.GetUsername())
+					return fmt.Errorf("too many open sessions: %d/%d", val, maxSessions)
 				}
-				conns.addUserConnection(username)
 			}
-			err := conn.CloseFS()
-			conns.connections[idx] = c
-			logger.Debug(logSender, c.GetID(), "connection swapped, close fs error: %v", err)
-			conn = nil
-			return nil
+			conns.addUserConnection(username)
 		}
+		err := conn.CloseFS()
+		conns.connections[idx] = c
+		logger.Debug(logSender, c.GetID(), "connection swapped, close fs error: %v", err)
+		conn = nil
+		return nil
 	}
+
 	return errors.New("connection to swap not found")
 }
 
@@ -835,49 +847,53 @@ func (conns *ActiveConnections) Remove(connectionID string) {
 	conns.Lock()
 	defer conns.Unlock()
 
-	for idx, conn := range conns.connections {
-		if conn.GetID() == connectionID {
-			err := conn.CloseFS()
-			lastIdx := len(conns.connections) - 1
-			conns.connections[idx] = conns.connections[lastIdx]
-			conns.connections[lastIdx] = nil
-			conns.connections = conns.connections[:lastIdx]
-			conns.removeUserConnection(conn.GetUsername())
-			metric.UpdateActiveConnectionsSize(lastIdx)
-			logger.Debug(conn.GetProtocol(), conn.GetID(), "connection removed, local address %#v, remote address %#v close fs error: %v, num open connections: %v",
-				conn.GetLocalAddress(), conn.GetRemoteAddress(), err, lastIdx)
-			if conn.GetProtocol() == ProtocolFTP && conn.GetUsername() == "" {
-				ip := util.GetIPFromRemoteAddress(conn.GetRemoteAddress())
-				logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, conn.GetProtocol(),
-					dataprovider.ErrNoAuthTryed.Error())
-				metric.AddNoAuthTryed()
-				AddDefenderEvent(ip, HostEventNoLoginTried)
-				dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTryed, ip,
-					conn.GetProtocol(), dataprovider.ErrNoAuthTryed)
-			}
-			Config.checkPostDisconnectHook(conn.GetRemoteAddress(), conn.GetProtocol(), conn.GetUsername(),
-				conn.GetID(), conn.GetConnectionTime())
-			return
+	if idx, ok := conns.mapping[connectionID]; ok {
+		conn := conns.connections[idx]
+		err := conn.CloseFS()
+		lastIdx := len(conns.connections) - 1
+		conns.connections[idx] = conns.connections[lastIdx]
+		conns.connections[lastIdx] = nil
+		conns.connections = conns.connections[:lastIdx]
+		delete(conns.mapping, connectionID)
+		if idx != lastIdx {
+			conns.mapping[conns.connections[idx].GetID()] = idx
 		}
+		conns.removeUserConnection(conn.GetUsername())
+		metric.UpdateActiveConnectionsSize(lastIdx)
+		logger.Debug(conn.GetProtocol(), conn.GetID(), "connection removed, local address %#v, remote address %#v close fs error: %v, num open connections: %v",
+			conn.GetLocalAddress(), conn.GetRemoteAddress(), err, lastIdx)
+		if conn.GetProtocol() == ProtocolFTP && conn.GetUsername() == "" {
+			ip := util.GetIPFromRemoteAddress(conn.GetRemoteAddress())
+			logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, conn.GetProtocol(),
+				dataprovider.ErrNoAuthTryed.Error())
+			metric.AddNoAuthTryed()
+			AddDefenderEvent(ip, HostEventNoLoginTried)
+			dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTryed, ip,
+				conn.GetProtocol(), dataprovider.ErrNoAuthTryed)
+		}
+		Config.checkPostDisconnectHook(conn.GetRemoteAddress(), conn.GetProtocol(), conn.GetUsername(),
+			conn.GetID(), conn.GetConnectionTime())
+		return
 	}
-	logger.Warn(logSender, "", "connection id %#v to remove not found!", connectionID)
+
+	logger.Warn(logSender, "", "connection id %q to remove not found!", connectionID)
 }
 
 // Close closes an active connection.
 // It returns true on success
 func (conns *ActiveConnections) Close(connectionID string) bool {
 	conns.RLock()
-	result := false
 
-	for _, c := range conns.connections {
-		if c.GetID() == connectionID {
-			defer func(conn ActiveConnection) {
-				err := conn.Disconnect()
-				logger.Debug(conn.GetProtocol(), conn.GetID(), "close connection requested, close err: %v", err)
-			}(c)
-			result = true
-			break
-		}
+	var result bool
+
+	if idx, ok := conns.mapping[connectionID]; ok {
+		c := conns.connections[idx]
+
+		defer func(conn ActiveConnection) {
+			err := conn.Disconnect()
+			logger.Debug(conn.GetProtocol(), conn.GetID(), "close connection requested, close err: %v", err)
+		}(c)
+		result = true
 	}
 
 	conns.RUnlock()
@@ -889,8 +905,9 @@ func (conns *ActiveConnections) AddSSHConnection(c *SSHConnection) {
 	conns.Lock()
 	defer conns.Unlock()
 
+	conns.sshMapping[c.GetID()] = len(conns.sshConnections)
 	conns.sshConnections = append(conns.sshConnections, c)
-	logger.Debug(logSender, c.GetID(), "ssh connection added, num open connections: %v", len(conns.sshConnections))
+	logger.Debug(logSender, c.GetID(), "ssh connection added, num open connections: %d", len(conns.sshConnections))
 }
 
 // RemoveSSHConnection removes a connection from the active ones
@@ -898,17 +915,19 @@ func (conns *ActiveConnections) RemoveSSHConnection(connectionID string) {
 	conns.Lock()
 	defer conns.Unlock()
 
-	for idx, conn := range conns.sshConnections {
-		if conn.GetID() == connectionID {
-			lastIdx := len(conns.sshConnections) - 1
-			conns.sshConnections[idx] = conns.sshConnections[lastIdx]
-			conns.sshConnections[lastIdx] = nil
-			conns.sshConnections = conns.sshConnections[:lastIdx]
-			logger.Debug(logSender, conn.GetID(), "ssh connection removed, num open ssh connections: %v", lastIdx)
-			return
+	if idx, ok := conns.sshMapping[connectionID]; ok {
+		lastIdx := len(conns.sshConnections) - 1
+		conns.sshConnections[idx] = conns.sshConnections[lastIdx]
+		conns.sshConnections[lastIdx] = nil
+		conns.sshConnections = conns.sshConnections[:lastIdx]
+		delete(conns.sshMapping, connectionID)
+		if idx != lastIdx {
+			conns.sshMapping[conns.sshConnections[idx].GetID()] = idx
 		}
+		logger.Debug(logSender, connectionID, "ssh connection removed, num open ssh connections: %d", lastIdx)
+		return
 	}
-	logger.Warn(logSender, "", "ssh connection to remove with id %#v not found!", connectionID)
+	logger.Warn(logSender, "", "ssh connection to remove with id %q not found!", connectionID)
 }
 
 func (conns *ActiveConnections) checkIdles() {
@@ -1076,6 +1095,7 @@ func (conns *ActiveConnections) GetStats() []ConnectionStatus {
 	defer conns.RUnlock()
 
 	stats := make([]ConnectionStatus, 0, len(conns.connections))
+	node := dataprovider.GetNodeName()
 	for _, c := range conns.connections {
 		stat := ConnectionStatus{
 			Username:       c.GetUsername(),
@@ -1087,6 +1107,7 @@ func (conns *ActiveConnections) GetStats() []ConnectionStatus {
 			Protocol:       c.GetProtocol(),
 			Command:        c.GetCommand(),
 			Transfers:      c.GetTransfers(),
+			Node:           node,
 		}
 		stats = append(stats, stat)
 	}
@@ -1113,6 +1134,8 @@ type ConnectionStatus struct {
 	Transfers []ConnectionTransfer `json:"active_transfers,omitempty"`
 	// SSH command or WebDAV method
 	Command string `json:"command,omitempty"`
+	// Node identifier, omitted for single node installations
+	Node string `json:"node,omitempty"`
 }
 
 // GetConnectionDuration returns the connection duration as string
@@ -1154,7 +1177,7 @@ func (c *ConnectionStatus) GetTransfersAsString() string {
 	return result
 }
 
-// ActiveQuotaScan defines an active quota scan for a user home dir
+// ActiveQuotaScan defines an active quota scan for a user
 type ActiveQuotaScan struct {
 	// Username to which the quota scan refers
 	Username string `json:"username"`
@@ -1177,7 +1200,7 @@ type ActiveScans struct {
 	FolderScans []ActiveVirtualFolderQuotaScan
 }
 
-// GetUsersQuotaScans returns the active quota scans for users home directories
+// GetUsersQuotaScans returns the active users quota scans
 func (s *ActiveScans) GetUsersQuotaScans() []ActiveQuotaScan {
 	s.RLock()
 	defer s.RUnlock()
@@ -1261,6 +1284,68 @@ func (s *ActiveScans) RemoveVFolderQuotaScan(folderName string) bool {
 			lastIdx := len(s.FolderScans) - 1
 			s.FolderScans[idx] = s.FolderScans[lastIdx]
 			s.FolderScans = s.FolderScans[:lastIdx]
+			return true
+		}
+	}
+
+	return false
+}
+
+// MetadataCheck defines an active metadata check
+type MetadataCheck struct {
+	// Username to which the metadata check refers
+	Username string `json:"username"`
+	// check start time as unix timestamp in milliseconds
+	StartTime int64 `json:"start_time"`
+}
+
+// MetadataChecks holds the active metadata checks
+type MetadataChecks struct {
+	sync.RWMutex
+	checks []MetadataCheck
+}
+
+// Get returns the active metadata checks
+func (c *MetadataChecks) Get() []MetadataCheck {
+	c.RLock()
+	defer c.RUnlock()
+
+	checks := make([]MetadataCheck, len(c.checks))
+	copy(checks, c.checks)
+
+	return checks
+}
+
+// Add adds a user to the ones with active metadata checks.
+// Return false if a metadata check is already active for the specified user
+func (c *MetadataChecks) Add(username string) bool {
+	c.Lock()
+	defer c.Unlock()
+
+	for idx := range c.checks {
+		if c.checks[idx].Username == username {
+			return false
+		}
+	}
+
+	c.checks = append(c.checks, MetadataCheck{
+		Username:  username,
+		StartTime: util.GetTimeAsMsSinceEpoch(time.Now()),
+	})
+
+	return true
+}
+
+// Remove removes a user from the ones with active metadata checks
+func (c *MetadataChecks) Remove(username string) bool {
+	c.Lock()
+	defer c.Unlock()
+
+	for idx := range c.checks {
+		if c.checks[idx].Username == username {
+			lastIdx := len(c.checks) - 1
+			c.checks[idx] = c.checks[lastIdx]
+			c.checks = c.checks[:lastIdx]
 			return true
 		}
 	}

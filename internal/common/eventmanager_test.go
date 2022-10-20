@@ -15,6 +15,7 @@
 package common
 
 import (
+	"bytes"
 	"crypto/rand"
 	"fmt"
 	"io"
@@ -28,6 +29,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zip"
 	"github.com/sftpgo/sdk"
 	sdkkms "github.com/sftpgo/sdk/kms"
 	"github.com/stretchr/testify/assert"
@@ -323,6 +325,8 @@ func TestEventManagerErrors(t *testing.T) {
 	assert.Error(t, err)
 	err = executeTransferQuotaResetRuleAction(dataprovider.ConditionOptions{}, &EventParams{})
 	assert.Error(t, err)
+	err = executeMetadataCheckRuleAction(dataprovider.ConditionOptions{}, &EventParams{})
+	assert.Error(t, err)
 	err = executeDeleteFsRuleAction(nil, nil, dataprovider.ConditionOptions{}, &EventParams{})
 	assert.Error(t, err)
 	err = executeMkdirFsRuleAction(nil, nil, dataprovider.ConditionOptions{}, &EventParams{})
@@ -331,9 +335,20 @@ func TestEventManagerErrors(t *testing.T) {
 	assert.Error(t, err)
 	err = executeExistFsRuleAction(nil, nil, dataprovider.ConditionOptions{}, &EventParams{})
 	assert.Error(t, err)
+	err = executeCompressFsRuleAction(dataprovider.EventActionFsCompress{}, nil, dataprovider.ConditionOptions{}, &EventParams{})
+	assert.Error(t, err)
 
 	groupName := "agroup"
 	err = executeQuotaResetForUser(dataprovider.User{
+		Groups: []sdk.GroupMapping{
+			{
+				Name: groupName,
+				Type: sdk.GroupTypePrimary,
+			},
+		},
+	})
+	assert.Error(t, err)
+	err = executeMetadataCheckForUser(dataprovider.User{
 		Groups: []sdk.GroupMapping{
 			{
 				Name: groupName,
@@ -379,6 +394,15 @@ func TestEventManagerErrors(t *testing.T) {
 	})
 	assert.Error(t, err)
 	err = executeExistFsActionForUser(nil, nil, dataprovider.User{
+		Groups: []sdk.GroupMapping{
+			{
+				Name: groupName,
+				Type: sdk.GroupTypePrimary,
+			},
+		},
+	})
+	assert.Error(t, err)
+	err = executeCompressFsActionForUser(dataprovider.EventActionFsCompress{}, nil, dataprovider.User{
 		Groups: []sdk.GroupMapping{
 			{
 				Name: groupName,
@@ -565,9 +589,8 @@ func TestEventRuleActions(t *testing.T) {
 		},
 	}
 	err = executeRuleAction(action, params, dataprovider.ConditionOptions{})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "error getting user")
-	}
+	assert.Contains(t, getErrorString(err), "error getting user")
+
 	action.Options.HTTPConfig.Parts = nil
 	action.Options.HTTPConfig.Body = "{{ObjectData}}"
 	// test disk and transfer quota reset
@@ -645,9 +668,42 @@ func TestEventRuleActions(t *testing.T) {
 			},
 		},
 	})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "no user quota reset executed")
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no user quota reset executed")
+
+	action = dataprovider.BaseEventAction{
+		Type: dataprovider.ActionTypeMetadataCheck,
 	}
+
+	err = executeRuleAction(action, &EventParams{}, dataprovider.ConditionOptions{
+		Names: []dataprovider.ConditionPattern{
+			{
+				Pattern: "don't match",
+			},
+		},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no metadata check executed")
+
+	err = executeRuleAction(action, &EventParams{}, dataprovider.ConditionOptions{
+		Names: []dataprovider.ConditionPattern{
+			{
+				Pattern: username1,
+			},
+		},
+	})
+	assert.NoError(t, err)
+	// simulate another metadata check in progress
+	assert.True(t, ActiveMetadataChecks.Add(username1))
+	err = executeRuleAction(action, &EventParams{}, dataprovider.ConditionOptions{
+		Names: []dataprovider.ConditionPattern{
+			{
+				Pattern: username1,
+			},
+		},
+	})
+	assert.Error(t, err)
+	assert.True(t, ActiveMetadataChecks.Remove(username1))
 
 	dataRetentionAction := dataprovider.BaseEventAction{
 		Type: dataprovider.ActionTypeDataRetentionCheck,
@@ -738,9 +794,9 @@ func TestEventRuleActions(t *testing.T) {
 			},
 		},
 	})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "no retention check executed")
-	}
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no retention check executed")
+
 	// test file exists action
 	action = dataprovider.BaseEventAction{
 		Type: dataprovider.ActionTypeFilesystem,
@@ -758,9 +814,9 @@ func TestEventRuleActions(t *testing.T) {
 			},
 		},
 	})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "no existence check executed")
-	}
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no existence check executed")
+
 	err = executeRuleAction(action, &EventParams{}, dataprovider.ConditionOptions{
 		Names: []dataprovider.ConditionPattern{
 			{
@@ -806,9 +862,9 @@ func TestEventRuleActions(t *testing.T) {
 			},
 		},
 	})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "no transfer quota reset executed")
-	}
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no transfer quota reset executed")
+
 	action.Type = dataprovider.ActionTypeFilesystem
 	action.Options = dataprovider.BaseEventActionOptions{
 		FsConfig: dataprovider.EventActionFilesystemConfig{
@@ -828,9 +884,9 @@ func TestEventRuleActions(t *testing.T) {
 			},
 		},
 	})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "no rename executed")
-	}
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no rename executed")
+
 	action.Options = dataprovider.BaseEventActionOptions{
 		FsConfig: dataprovider.EventActionFilesystemConfig{
 			Type:    dataprovider.FilesystemActionDelete,
@@ -844,9 +900,9 @@ func TestEventRuleActions(t *testing.T) {
 			},
 		},
 	})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "no delete executed")
-	}
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no delete executed")
+
 	action.Options = dataprovider.BaseEventActionOptions{
 		FsConfig: dataprovider.EventActionFilesystemConfig{
 			Type:    dataprovider.FilesystemActionMkdirs,
@@ -860,9 +916,37 @@ func TestEventRuleActions(t *testing.T) {
 			},
 		},
 	})
-	if assert.Error(t, err) {
-		assert.Contains(t, err.Error(), "no mkdir executed")
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no mkdir executed")
+
+	action.Options = dataprovider.BaseEventActionOptions{
+		FsConfig: dataprovider.EventActionFilesystemConfig{
+			Type: dataprovider.FilesystemActionCompress,
+			Compress: dataprovider.EventActionFsCompress{
+				Name:  "test.zip",
+				Paths: []string{"/{{VirtualPath}}"},
+			},
+		},
 	}
+	err = executeRuleAction(action, &EventParams{}, dataprovider.ConditionOptions{
+		Names: []dataprovider.ConditionPattern{
+			{
+				Pattern: "no match",
+			},
+		},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no file/folder compressed")
+
+	err = executeRuleAction(action, &EventParams{}, dataprovider.ConditionOptions{
+		GroupNames: []dataprovider.ConditionPattern{
+			{
+				Pattern: "no match",
+			},
+		},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, getErrorString(err), "no file/folder compressed")
 
 	err = dataprovider.DeleteUser(username1, "", "")
 	assert.NoError(t, err)
@@ -987,6 +1071,10 @@ func TestEventRuleActionsNoGroupMatching(t *testing.T) {
 	err = executeUsersQuotaResetRuleAction(conditions, &EventParams{})
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "no user quota reset executed")
+	}
+	err = executeMetadataCheckRuleAction(conditions, &EventParams{})
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "no metadata check executed")
 	}
 	err = executeTransferQuotaResetRuleAction(conditions, &EventParams{})
 	if assert.Error(t, err) {
@@ -1114,6 +1202,10 @@ func TestFilesystemActionErrors(t *testing.T) {
 	assert.Error(t, err)
 	err = executeExistFsActionForUser(nil, testReplacer, user)
 	assert.Error(t, err)
+	err = executeCompressFsActionForUser(dataprovider.EventActionFsCompress{}, testReplacer, user)
+	assert.Error(t, err)
+	_, _, _, _, err = getFileWriter(conn, "/path.txt") //nolint:dogsled
+	assert.Error(t, err)
 	err = executeEmailRuleAction(dataprovider.EventActionEmailConfig{
 		Recipients:  []string{"test@example.net"},
 		Subject:     "subject",
@@ -1180,7 +1272,7 @@ func TestFilesystemActionErrors(t *testing.T) {
 		err := os.MkdirAll(dirPath, os.ModePerm)
 		assert.NoError(t, err)
 		filePath := filepath.Join(dirPath, "f.dat")
-		err = os.WriteFile(filePath, nil, 0666)
+		err = os.WriteFile(filePath, []byte("test file content"), 0666)
 		assert.NoError(t, err)
 		err = os.Chmod(dirPath, 0001)
 		assert.NoError(t, err)
@@ -1240,6 +1332,16 @@ func TestFilesystemActionErrors(t *testing.T) {
 
 		err = os.Chmod(dirPath, os.ModePerm)
 		assert.NoError(t, err)
+
+		conn = NewBaseConnection("", protocolEventAction, "", "", user)
+		wr := &zipWriterWrapper{
+			Name:    "test.zip",
+			Writer:  zip.NewWriter(bytes.NewBuffer(nil)),
+			Entries: map[string]bool{},
+		}
+		err = addZipEntry(wr, conn, "/adir/sub/f.dat", "/adir/sub/sub")
+		assert.Error(t, err)
+		assert.Contains(t, getErrorString(err), "is outside base dir")
 	}
 
 	err = dataprovider.DeleteUser(username, "", "")
@@ -1494,4 +1596,21 @@ func TestWriteHTTPPartsError(t *testing.T) {
 		Body: body,
 	}, nil, nil, nil, &EventParams{})
 	assert.ErrorIs(t, err, io.ErrUnexpectedEOF)
+}
+
+func TestReplacePathsPlaceholders(t *testing.T) {
+	replacer := strings.NewReplacer("{{VirtualPath}}", "/path1")
+	paths := []string{"{{VirtualPath}}", "/path1"}
+	paths = replacePathsPlaceholders(paths, replacer)
+	assert.Equal(t, []string{"/path1"}, paths)
+	paths = []string{"{{VirtualPath}}", "/path2"}
+	paths = replacePathsPlaceholders(paths, replacer)
+	assert.Equal(t, []string{"/path1", "/path2"}, paths)
+}
+
+func getErrorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
