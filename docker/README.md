@@ -4,12 +4,14 @@ SFTPGo provides an official Docker image, it is available on both [Docker Hub](h
 
 ## Supported tags and respective Dockerfile links
 
-- [v2.3.1, v2.3, v2, latest](https://github.com/drakkan/sftpgo/blob/v2.3.1/Dockerfile)
-- [v2.3.1-alpine, v2.3-alpine, v2-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v2.3.1/Dockerfile.alpine)
-- [v2.3.1-slim, v2.3-slim, v2-slim, slim](https://github.com/drakkan/sftpgo/blob/v2.3.1/Dockerfile)
-- [v2.3.1-alpine-slim, v2.3-alpine-slim, v2-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v2.3.1/Dockerfile.alpine)
-- [v2.3.1-distroless-slim, v2.3-distroless-slim, v2-distroless-slim, distroless-slim](https://github.com/drakkan/sftpgo/blob/v2.3.1/Dockerfile.distroless)
+- [v2.3.6, v2.3, v2, latest](https://github.com/drakkan/sftpgo/blob/v2.3.6/Dockerfile)
+- [v2.3.6-plugins, v2.3-plugins, v2-plugins, plugins](https://github.com/drakkan/sftpgo/blob/v2.3.6/Dockerfile)
+- [v2.3.6-alpine, v2.3-alpine, v2-alpine, alpine](https://github.com/drakkan/sftpgo/blob/v2.3.6/Dockerfile.alpine)
+- [v2.3.6-slim, v2.3-slim, v2-slim, slim](https://github.com/drakkan/sftpgo/blob/v2.3.6/Dockerfile)
+- [v2.3.6-alpine-slim, v2.3-alpine-slim, v2-alpine-slim, alpine-slim](https://github.com/drakkan/sftpgo/blob/v2.3.6/Dockerfile.alpine)
+- [v2.3.6-distroless-slim, v2.3-distroless-slim, v2-distroless-slim, distroless-slim](https://github.com/drakkan/sftpgo/blob/v2.3.6/Dockerfile.distroless)
 - [edge](../Dockerfile)
+- [edge-plugins](../Dockerfile)
 - [edge-alpine](../Dockerfile.alpine)
 - [edge-slim](../Dockerfile)
 - [edge-alpine-slim](../Dockerfile.alpine)
@@ -197,7 +199,11 @@ We only provide the slim variant and so the optional `git` dependency is not ava
 
 ### `sftpgo:<suite>-slim`
 
-These tags provide a slimmer image that does not include the optional `git` dependency.
+These tags provide a slimmer image that does not include `jq` and the optional `git` and `rsync` dependencies.
+
+### `sftpgo:<suite>-plugins`
+
+These tags provide the standard image with the addition of all "official" plugins installed in `/usr/local/bin`.
 
 ## Helm Chart
 

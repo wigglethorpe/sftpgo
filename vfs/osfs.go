@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package vfs
 
 import (
@@ -227,10 +241,10 @@ func (fs *OsFs) CheckRootPath(username string, uid int, gid int) bool {
 	var err error
 	if _, err = fs.Stat(fs.rootDir); fs.IsNotExist(err) {
 		err = os.MkdirAll(fs.rootDir, os.ModePerm)
-		fsLog(fs, logger.LevelDebug, "root directory %#v for user %#v does not exist, try to create, mkdir error: %v",
-			fs.rootDir, username, err)
 		if err == nil {
 			SetPathPermissions(fs, fs.rootDir, uid, gid)
+		} else {
+			fsLog(fs, logger.LevelError, "error creating root directory %q for user %q: %v", fs.rootDir, username, err)
 		}
 	}
 	return err == nil

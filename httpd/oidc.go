@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
@@ -70,8 +84,15 @@ type OIDC struct {
 	// If set, the `RoleField` is ignored and the SFTPGo role is assumed based on
 	// the login link used
 	ImplicitRoles bool `json:"implicit_roles" mapstructure:"implicit_roles"`
+	// Scopes required by the OAuth provider to retrieve information about the authenticated user.
+	// The "openid" scope is required.
+	// Refer to your OAuth provider documentation for more information about this
+	Scopes []string `json:"scopes" mapstructure:"scopes"`
 	// Custom token claims fields to pass to the pre-login hook
-	CustomFields      []string `json:"custom_fields" mapstructure:"custom_fields"`
+	CustomFields []string `json:"custom_fields" mapstructure:"custom_fields"`
+	// Debug enables the OIDC debug mode. In debug mode, the received id_token will be logged
+	// at the debug level
+	Debug             bool `json:"debug" mapstructure:"debug"`
 	provider          *oidc.Provider
 	verifier          OIDCTokenVerifier
 	providerLogoutURL string
@@ -116,6 +137,9 @@ func (o *OIDC) initialize() error {
 	if o.RedirectBaseURL == "" {
 		return errors.New("oidc: redirect base URL cannot be empty")
 	}
+	if !util.Contains(o.Scopes, oidc.ScopeOpenID) {
+		return fmt.Errorf("oidc: required scope %q is not set", oidc.ScopeOpenID)
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -143,7 +167,7 @@ func (o *OIDC) initialize() error {
 		ClientSecret: o.ClientSecret,
 		Endpoint:     o.provider.Endpoint(),
 		RedirectURL:  o.getRedirectURL(),
-		Scopes:       []string{oidc.ScopeOpenID, "profile", "email"},
+		Scopes:       o.Scopes,
 	}
 
 	return nil
@@ -201,12 +225,7 @@ func (t *oidcToken) parseClaims(claims map[string]any, usernameField, roleField 
 	if forcedRole != "" {
 		t.Role = forcedRole
 	} else {
-		if roleField != "" {
-			role, ok := claims[roleField]
-			if ok {
-				t.Role = role
-			}
-		}
+		t.getRoleFromField(claims, roleField)
 	}
 	t.CustomFields = nil
 	if len(customFields) > 0 {
@@ -228,6 +247,41 @@ func (t *oidcToken) parseClaims(claims map[string]any, usernameField, roleField 
 		t.SessionID = sid
 	}
 	return nil
+}
+
+func (t *oidcToken) getRoleFromField(claims map[string]any, roleField string) {
+	if roleField != "" {
+		role, ok := claims[roleField]
+		if ok {
+			t.Role = role
+			return
+		}
+		if !strings.Contains(roleField, ".") {
+			return
+		}
+
+		getStructValue := func(outer any, field string) (any, bool) {
+			switch val := outer.(type) {
+			case map[string]any:
+				res, ok := val[field]
+				return res, ok
+			}
+			return nil, false
+		}
+
+		for idx, field := range strings.Split(roleField, ".") {
+			if idx == 0 {
+				role, ok = getStructValue(claims, field)
+			} else {
+				role, ok = getStructValue(role, field)
+			}
+			if !ok {
+				return
+			}
+		}
+
+		t.Role = role
+	}
 }
 
 func (t *oidcToken) isAdmin() bool {
@@ -456,6 +510,16 @@ func (s *httpdServer) oidcLoginRedirect(w http.ResponseWriter, r *http.Request, 
 		oidc.Nonce(pendingAuth.Nonce)), http.StatusFound)
 }
 
+func (s *httpdServer) debugTokenClaims(claims map[string]any, rawIDToken string) {
+	if s.binding.OIDC.Debug {
+		if claims == nil {
+			logger.Debug(logSender, "", "raw id token %q", rawIDToken)
+		} else {
+			logger.Debug(logSender, "", "raw id token %q, parsed claims %+v", rawIDToken, claims)
+		}
+	}
+}
+
 func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	authReq, err := oidcMgr.getPendingAuth(state)
@@ -495,6 +559,7 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 		doRedirect()
 		return
 	}
+	s.debugTokenClaims(nil, rawIDToken)
 	idToken, err := s.binding.OIDC.verifier.Verify(ctx, rawIDToken)
 	if err != nil {
 		logger.Debug(logSender, "", "failed to verify oidc token: %v", err)
@@ -520,6 +585,7 @@ func (s *httpdServer) handleOIDCRedirect(w http.ResponseWriter, r *http.Request)
 		doLogout(rawIDToken)
 		return
 	}
+	s.debugTokenClaims(claims, rawIDToken)
 	token := oidcToken{
 		AccessToken:  oauth2Token.AccessToken,
 		TokenType:    oauth2Token.TokenType,

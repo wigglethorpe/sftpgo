@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package ftpd
 
 import (
@@ -266,6 +280,8 @@ func (cc mockFTPClientContext) Path() string {
 
 func (cc mockFTPClientContext) SetPath(name string) {}
 
+func (cc mockFTPClientContext) SetListPath(name string) {}
+
 func (cc mockFTPClientContext) SetDebug(debug bool) {}
 
 func (cc mockFTPClientContext) Debug() bool {
@@ -310,6 +326,10 @@ func (cc mockFTPClientContext) HasTLSForTransfers() bool {
 
 func (cc mockFTPClientContext) GetLastCommand() string {
 	return ""
+}
+
+func (cc mockFTPClientContext) SetTLSRequirement(requirement ftpserver.TLSRequirement) error {
+	return nil
 }
 
 func (cc mockFTPClientContext) GetLastDataChannel() ftpserver.DataChannel {

@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
@@ -22,6 +36,7 @@ import (
 
 	"github.com/drakkan/sftpgo/v2/common"
 	"github.com/drakkan/sftpgo/v2/dataprovider"
+	"github.com/drakkan/sftpgo/v2/logger"
 	"github.com/drakkan/sftpgo/v2/mfa"
 	"github.com/drakkan/sftpgo/v2/smtp"
 	"github.com/drakkan/sftpgo/v2/util"
@@ -80,25 +95,24 @@ func isZeroTime(t time.Time) bool {
 }
 
 type baseClientPage struct {
-	Title            string
-	CurrentURL       string
-	FilesURL         string
-	SharesURL        string
-	ShareURL         string
-	ProfileURL       string
-	ChangePwdURL     string
-	StaticURL        string
-	LogoutURL        string
-	MFAURL           string
-	MFATitle         string
-	FilesTitle       string
-	SharesTitle      string
-	ProfileTitle     string
-	Version          string
-	CSRFToken        string
-	HasExternalLogin bool
-	LoggedUser       *dataprovider.User
-	Branding         UIBranding
+	Title        string
+	CurrentURL   string
+	FilesURL     string
+	SharesURL    string
+	ShareURL     string
+	ProfileURL   string
+	ChangePwdURL string
+	StaticURL    string
+	LogoutURL    string
+	MFAURL       string
+	MFATitle     string
+	FilesTitle   string
+	SharesTitle  string
+	ProfileTitle string
+	Version      string
+	CSRFToken    string
+	LoggedUser   *dataprovider.User
+	Branding     UIBranding
 }
 
 type dirMapping struct {
@@ -337,25 +351,24 @@ func (s *httpdServer) getBaseClientPageData(title, currentURL string, r *http.Re
 	v := version.Get()
 
 	return baseClientPage{
-		Title:            title,
-		CurrentURL:       currentURL,
-		FilesURL:         webClientFilesPath,
-		SharesURL:        webClientSharesPath,
-		ShareURL:         webClientSharePath,
-		ProfileURL:       webClientProfilePath,
-		ChangePwdURL:     webChangeClientPwdPath,
-		StaticURL:        webStaticFilesPath,
-		LogoutURL:        webClientLogoutPath,
-		MFAURL:           webClientMFAPath,
-		MFATitle:         pageClient2FATitle,
-		FilesTitle:       pageClientFilesTitle,
-		SharesTitle:      pageClientSharesTitle,
-		ProfileTitle:     pageClientProfileTitle,
-		Version:          fmt.Sprintf("%v-%v", v.Version, v.CommitHash),
-		CSRFToken:        csrfToken,
-		HasExternalLogin: isLoggedInWithOIDC(r),
-		LoggedUser:       getUserFromToken(r),
-		Branding:         s.binding.Branding.WebClient,
+		Title:        title,
+		CurrentURL:   currentURL,
+		FilesURL:     webClientFilesPath,
+		SharesURL:    webClientSharesPath,
+		ShareURL:     webClientSharePath,
+		ProfileURL:   webClientProfilePath,
+		ChangePwdURL: webChangeClientPwdPath,
+		StaticURL:    webStaticFilesPath,
+		LogoutURL:    webClientLogoutPath,
+		MFAURL:       webClientMFAPath,
+		MFATitle:     pageClient2FATitle,
+		FilesTitle:   pageClientFilesTitle,
+		SharesTitle:  pageClientSharesTitle,
+		ProfileTitle: pageClientProfileTitle,
+		Version:      fmt.Sprintf("%v-%v", v.Version, v.CommitHash),
+		CSRFToken:    csrfToken,
+		LoggedUser:   getUserFromToken(r),
+		Branding:     s.binding.Branding.WebClient,
 	}
 }
 
@@ -639,7 +652,8 @@ func (s *httpdServer) handleWebClientDownloadZip(w http.ResponseWriter, r *http.
 		return
 	}
 
-	w.Header().Set("Content-Disposition", "attachment; filename=\"sftpgo-download.zip\"")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=\"%s\"",
+		getCompressedFileName(connection.GetUsername(), filesList)))
 	renderCompressedFiles(w, connection, name, filesList, nil)
 }
 
@@ -744,9 +758,8 @@ func (s *httpdServer) handleShareGetFiles(w http.ResponseWriter, r *http.Request
 		s.renderSharedFilesPage(w, r, share.GetRelativePath(name), "", share)
 		return
 	}
-	inline := r.URL.Query().Get("inline") != ""
 	dataprovider.UpdateShareLastUse(&share, 1) //nolint:errcheck
-	if status, err := downloadFile(w, r, connection, name, info, inline, &share); err != nil {
+	if status, err := downloadFile(w, r, connection, name, info, false, &share); err != nil {
 		dataprovider.UpdateShareLastUse(&share, -1) //nolint:errcheck
 		if status > 0 {
 			s.renderSharedFilesPage(w, r, path.Dir(share.GetRelativePath(name)), err.Error(), share)
@@ -879,8 +892,7 @@ func (s *httpdServer) handleClientGetFiles(w http.ResponseWriter, r *http.Reques
 		s.renderFilesPage(w, r, name, "", user, len(s.binding.WebClientIntegrations) > 0)
 		return
 	}
-	inline := r.URL.Query().Get("inline") != ""
-	if status, err := downloadFile(w, r, connection, name, info, inline, nil); err != nil && status != 0 {
+	if status, err := downloadFile(w, r, connection, name, info, false, nil); err != nil && status != 0 {
 		if status > 0 {
 			if status == http.StatusRequestedRangeNotSatisfiable {
 				s.renderClientMessagePage(w, r, http.StatusText(status), "", status, err, "")
@@ -941,6 +953,7 @@ func (s *httpdServer) handleClientEditFile(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	reader, err := connection.getFileReader(name, 0, r.Method)
 	if err != nil {
 		s.renderClientMessagePage(w, r, fmt.Sprintf("Unable to get a reader for the file %#v", name), "",
@@ -1277,9 +1290,80 @@ func (s *httpdServer) handleClientViewPDF(w http.ResponseWriter, r *http.Request
 	name = util.CleanPath(name)
 	data := viewPDFPage{
 		Title:     path.Base(name),
-		URL:       fmt.Sprintf("%v?path=%v&inline=1", webClientFilesPath, url.QueryEscape(name)),
+		URL:       fmt.Sprintf("%s?path=%s&_=%d", webClientGetPDFPath, url.QueryEscape(name), time.Now().UTC().Unix()),
 		StaticURL: webStaticFilesPath,
 		Branding:  s.binding.Branding.WebClient,
 	}
 	renderClientTemplate(w, templateClientViewPDF, data)
+}
+
+func (s *httpdServer) handleClientGetPDF(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxLoginBodySize)
+	claims, err := getTokenClaims(r)
+	if err != nil || claims.Username == "" {
+		s.renderClientForbiddenPage(w, r, "Invalid token claims")
+		return
+	}
+	name := r.URL.Query().Get("path")
+	if name == "" {
+		s.renderClientBadRequestPage(w, r, errors.New("no file specified"))
+		return
+	}
+	name = util.CleanPath(name)
+	user, err := dataprovider.GetUserWithGroupSettings(claims.Username)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Unable to retrieve your user", "", getRespStatus(err), nil, "")
+		return
+	}
+
+	connID := xid.New().String()
+	protocol := getProtocolFromRequest(r)
+	connectionID := fmt.Sprintf("%v_%v", protocol, connID)
+	if err := checkHTTPClientUser(&user, r, connectionID, false); err != nil {
+		s.renderClientForbiddenPage(w, r, err.Error())
+		return
+	}
+	connection := &Connection{
+		BaseConnection: common.NewBaseConnection(connID, protocol, util.GetHTTPLocalAddress(r),
+			r.RemoteAddr, user),
+		request: r,
+	}
+	if err = common.Connections.Add(connection); err != nil {
+		s.renderClientMessagePage(w, r, "Unable to add connection", "", http.StatusTooManyRequests, err, "")
+		return
+	}
+	defer common.Connections.Remove(connection.GetID())
+
+	info, err := connection.Stat(name, 0)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Unable to get file", "", getRespStatus(err), err, "")
+		return
+	}
+	if info.IsDir() {
+		s.renderClientMessagePage(w, r, "Invalid file", fmt.Sprintf("%q is not a file", name),
+			http.StatusBadRequest, nil, "")
+		return
+	}
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
+	reader, err := connection.getFileReader(name, 0, r.Method)
+	if err != nil {
+		s.renderClientMessagePage(w, r, fmt.Sprintf("Unable to get a reader for the file %q", name), "",
+			getRespStatus(err), err, "")
+		return
+	}
+	defer reader.Close()
+
+	var b bytes.Buffer
+	_, err = io.CopyN(&b, reader, 128)
+	if err != nil {
+		s.renderClientMessagePage(w, r, "Invalid PDF file", fmt.Sprintf("Unable to validate the file %q as PDF", name),
+			http.StatusBadRequest, nil, "")
+		return
+	}
+	if ctype := http.DetectContentType(b.Bytes()); ctype != "application/pdf" {
+		connection.Log(logger.LevelDebug, "detected %q content type, expected PDF, file %q", ctype, name)
+		s.renderClientBadRequestPage(w, r, fmt.Errorf("the file %q does not look like a PDF", name))
+		return
+	}
+	downloadFile(w, r, connection, name, info, true, nil) //nolint:errcheck
 }

@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //go:build !nobolt
 // +build !nobolt
 
@@ -1030,9 +1044,7 @@ func (p *BoltProvider) updateFolder(folder *vfs.BaseVirtualFolder) error {
 	})
 }
 
-func (p *BoltProvider) deleteFolderMappings(tx *bolt.Tx, folder vfs.BaseVirtualFolder, usersBucket,
-	groupsBucket *bolt.Bucket,
-) error {
+func (p *BoltProvider) deleteFolderMappings(folder vfs.BaseVirtualFolder, usersBucket, groupsBucket *bolt.Bucket) error {
 	for _, username := range folder.Users {
 		var u []byte
 		if u = usersBucket.Get([]byte(username)); u == nil {
@@ -1112,7 +1124,7 @@ func (p *BoltProvider) deleteFolder(folder vfs.BaseVirtualFolder) error {
 		if err != nil {
 			return err
 		}
-		if err = p.deleteFolderMappings(tx, folder, usersBucket, groupsBucket); err != nil {
+		if err = p.deleteFolderMappings(folder, usersBucket, groupsBucket); err != nil {
 			return err
 		}
 

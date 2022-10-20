@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 // Package httpd implements REST API and Web interface for SFTPGo.
 // The OpenAPI 3 schema for the exposed API can be found inside the source tree:
 // https://github.com/drakkan/sftpgo/blob/main/openapi/openapi.yaml
@@ -5,6 +19,7 @@ package httpd
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -149,6 +164,7 @@ const (
 	webClientForgotPwdPathDefault         = "/web/client/forgot-password"
 	webClientResetPwdPathDefault          = "/web/client/reset-password"
 	webClientViewPDFPathDefault           = "/web/client/viewpdf"
+	webClientGetPDFPathDefault            = "/web/client/getpdf"
 	webStaticFilesPathDefault             = "/static"
 	webOpenAPIPathDefault                 = "/openapi"
 	// MaxRestoreSize defines the max size for the loaddata input file
@@ -230,10 +246,12 @@ var (
 	webClientForgotPwdPath         string
 	webClientResetPwdPath          string
 	webClientViewPDFPath           string
+	webClientGetPDFPath            string
 	webStaticFilesPath             string
 	webOpenAPIPath                 string
 	// max upload size for http clients, 1GB by default
 	maxUploadFileSize          = int64(1048576000)
+	hideSupportLink            bool
 	installationCode           string
 	installationCodeHint       string
 	fnInstallationCodeResolver FnInstallationCodeResolver
@@ -395,6 +413,17 @@ type Binding struct {
 	// Enable the built-in client interface.
 	// You have to define TemplatesPath and StaticFilesPath for this to work
 	EnableWebClient bool `json:"enable_web_client" mapstructure:"enable_web_client"`
+	// Defines the login methods available for the WebAdmin and WebClient UIs:
+	//
+	// - 0 means any configured method: username/password login form and OIDC, if enabled
+	// - 1 means OIDC for the WebAdmin UI
+	// - 2 means OIDC for the WebClient UI
+	// - 4 means login form for the WebAdmin UI
+	// - 8 means login form for the WebClient UI
+	//
+	// You can combine the values. For example 3 means that you can only login using OIDC on
+	// both WebClient and WebAdmin UI.
+	EnabledLoginMethods int `json:"enabled_login_methods" mapstructure:"enabled_login_methods"`
 	// you also need to provide a certificate for enabling HTTPS
 	EnableHTTPS bool `json:"enable_https" mapstructure:"enable_https"`
 	// Certificate and matching private key for this specific binding, if empty the global
@@ -505,6 +534,66 @@ func (b *Binding) IsValid() bool {
 	return false
 }
 
+func (b *Binding) isWebAdminOIDCLoginDisabled() bool {
+	if b.EnableWebAdmin {
+		if b.EnabledLoginMethods == 0 {
+			return false
+		}
+		return b.EnabledLoginMethods&1 == 0
+	}
+	return false
+}
+
+func (b *Binding) isWebClientOIDCLoginDisabled() bool {
+	if b.EnableWebClient {
+		if b.EnabledLoginMethods == 0 {
+			return false
+		}
+		return b.EnabledLoginMethods&2 == 0
+	}
+	return false
+}
+
+func (b *Binding) isWebAdminLoginFormDisabled() bool {
+	if b.EnableWebAdmin {
+		if b.EnabledLoginMethods == 0 {
+			return false
+		}
+		return b.EnabledLoginMethods&4 == 0
+	}
+	return false
+}
+
+func (b *Binding) isWebClientLoginFormDisabled() bool {
+	if b.EnableWebClient {
+		if b.EnabledLoginMethods == 0 {
+			return false
+		}
+		return b.EnabledLoginMethods&8 == 0
+	}
+	return false
+}
+
+func (b *Binding) checkLoginMethods() error {
+	if b.isWebAdminLoginFormDisabled() && b.isWebAdminOIDCLoginDisabled() {
+		return errors.New("no login method available for WebAdmin UI")
+	}
+	if !b.isWebAdminOIDCLoginDisabled() {
+		if b.isWebAdminLoginFormDisabled() && !b.OIDC.hasRoles() {
+			return errors.New("no login method available for WebAdmin UI")
+		}
+	}
+	if b.isWebClientLoginFormDisabled() && b.isWebClientOIDCLoginDisabled() {
+		return errors.New("no login method available for WebClient UI")
+	}
+	if !b.isWebClientOIDCLoginDisabled() {
+		if b.isWebClientLoginFormDisabled() && !b.OIDC.isEnabled() {
+			return errors.New("no login method available for WebClient UI")
+		}
+	}
+	return nil
+}
+
 func (b *Binding) showAdminLoginURL() bool {
 	if !b.EnableWebAdmin {
 		return false
@@ -605,6 +694,8 @@ type Conf struct {
 	Cors CorsConfig `json:"cors" mapstructure:"cors"`
 	// Initial setup configuration
 	Setup SetupConfig `json:"setup" mapstructure:"setup"`
+	// If enabled, the link to the sponsors section will not appear on the setup screen page
+	HideSupportLink bool `json:"hide_support_link" mapstructure:"hide_support_link"`
 }
 
 type apiResponse struct {
@@ -746,6 +837,7 @@ func (c *Conf) Initialize(configDir string, isShared int) error {
 	}
 
 	csrfTokenAuth = jwtauth.New(jwa.HS256.String(), getSigningKey(c.SigningPassphrase), nil)
+	hideSupportLink = c.HideSupportLink
 
 	exitChannel := make(chan error, 1)
 
@@ -762,6 +854,10 @@ func (c *Conf) Initialize(configDir string, isShared int) error {
 
 		go func(b Binding) {
 			if err := b.OIDC.initialize(); err != nil {
+				exitChannel <- err
+				return
+			}
+			if err := b.checkLoginMethods(); err != nil {
 				exitChannel <- err
 				return
 			}
@@ -865,6 +961,7 @@ func updateWebClientURLs(baseURL string) {
 	webClientForgotPwdPath = path.Join(baseURL, webClientForgotPwdPathDefault)
 	webClientResetPwdPath = path.Join(baseURL, webClientResetPwdPathDefault)
 	webClientViewPDFPath = path.Join(baseURL, webClientViewPDFPathDefault)
+	webClientGetPDFPath = path.Join(baseURL, webClientGetPDFPathDefault)
 }
 
 func updateWebAdminURLs(baseURL string) {

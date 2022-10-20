@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //go:build !nosqlite
 // +build !nosqlite
 
@@ -115,12 +129,12 @@ CREATE TABLE "{{groups_folders_mapping}}" ("id" integer NOT NULL PRIMARY KEY AUT
 "virtual_path" text NOT NULL, "quota_size" bigint NOT NULL, "quota_files" integer NOT NULL,
 CONSTRAINT "{{prefix}}unique_group_folder_mapping" UNIQUE ("group_id", "folder_id"));
 CREATE TABLE "{{users_groups_mapping}}" ("id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
-"user_id" integer NOT NULL REFERENCES "users" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-"group_id" integer NOT NULL REFERENCES "groups" ("id") ON DELETE NO ACTION,
+"user_id" integer NOT NULL REFERENCES "{{users}}" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+"group_id" integer NOT NULL REFERENCES "{{groups}}" ("id") ON DELETE NO ACTION,
 "group_type" integer NOT NULL, CONSTRAINT "{{prefix}}unique_user_group_mapping" UNIQUE ("user_id", "group_id"));
 CREATE TABLE "new__folders_mapping" ("id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
-"user_id" integer NOT NULL REFERENCES "users" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-"folder_id" integer NOT NULL REFERENCES "folders" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+"user_id" integer NOT NULL REFERENCES "{{users}}" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+"folder_id" integer NOT NULL REFERENCES "{{folders}}" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
 "virtual_path" text NOT NULL, "quota_size" bigint NOT NULL, "quota_files" integer NOT NULL,
 CONSTRAINT "{{prefix}}unique_user_folder_mapping" UNIQUE ("user_id", "folder_id"));
 INSERT INTO "new__folders_mapping" ("id", "virtual_path", "quota_size", "quota_files", "folder_id", "user_id") SELECT "id",
@@ -139,8 +153,8 @@ CREATE INDEX "{{prefix}}groups_folders_mapping_group_id_idx" ON "{{groups_folder
 DROP TABLE "{{groups_folders_mapping}}";
 DROP TABLE "{{groups}}";
 CREATE TABLE "new__folders_mapping" ("id" integer NOT NULL PRIMARY KEY AUTOINCREMENT,
-"user_id" integer NOT NULL REFERENCES "users" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
-"folder_id" integer NOT NULL REFERENCES "folders" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+"user_id" integer NOT NULL REFERENCES "{{users}}" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
+"folder_id" integer NOT NULL REFERENCES "{{folders}}" ("id") ON DELETE CASCADE DEFERRABLE INITIALLY DEFERRED,
 "virtual_path" text NOT NULL, "quota_size" bigint NOT NULL, "quota_files" integer NOT NULL,
 CONSTRAINT "{{prefix}}unique_folder_mapping" UNIQUE ("user_id", "folder_id"));
 INSERT INTO "new__folders_mapping" ("id", "virtual_path", "quota_size", "quota_files", "folder_id", "user_id") SELECT "id",
@@ -652,6 +666,7 @@ func updateSQLiteDatabaseFrom16To17(dbHandle *sql.DB) error {
 	}
 	sql := strings.ReplaceAll(sqliteV17SQL, "{{users}}", sqlTableUsers)
 	sql = strings.ReplaceAll(sql, "{{groups}}", sqlTableGroups)
+	sql = strings.ReplaceAll(sql, "{{users}}", sqlTableUsers)
 	sql = strings.ReplaceAll(sql, "{{folders}}", sqlTableFolders)
 	sql = strings.ReplaceAll(sql, "{{folders_mapping}}", sqlTableFoldersMapping)
 	sql = strings.ReplaceAll(sql, "{{users_folders_mapping}}", sqlTableUsersFoldersMapping)

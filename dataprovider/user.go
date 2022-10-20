@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package dataprovider
 
 import (
@@ -194,6 +208,26 @@ func (u *User) checkDirWithParents(virtualDirPath, connectionID string) error {
 	return nil
 }
 
+func (u *User) checkLocalHomeDir(connectionID string) {
+	switch u.FsConfig.Provider {
+	case sdk.LocalFilesystemProvider, sdk.CryptedFilesystemProvider:
+		return
+	default:
+		osFs := vfs.NewOsFs(connectionID, u.GetHomeDir(), "")
+		osFs.CheckRootPath(u.Username, u.GetUID(), u.GetGID())
+	}
+}
+
+func (u *User) checkRootPath(connectionID string) error {
+	fs, err := u.GetFilesystemForPath("/", connectionID)
+	if err != nil {
+		logger.Warn(logSender, connectionID, "could not create main filesystem for user %q err: %v", u.Username, err)
+		return fmt.Errorf("could not create root filesystem: %w", err)
+	}
+	fs.CheckRootPath(u.Username, u.GetUID(), u.GetGID())
+	return nil
+}
+
 // CheckFsRoot check the root directory for the main fs and the virtual folders.
 // It returns an error if the main filesystem cannot be created
 func (u *User) CheckFsRoot(connectionID string) error {
@@ -209,15 +243,16 @@ func (u *User) CheckFsRoot(connectionID string) error {
 	}
 	if isLastActivityRecent(u.LastLogin, delay) {
 		if u.LastLogin > u.UpdatedAt {
+			if config.IsShared == 1 {
+				u.checkLocalHomeDir(connectionID)
+			}
 			return nil
 		}
 	}
-	fs, err := u.GetFilesystemForPath("/", connectionID)
+	err := u.checkRootPath(connectionID)
 	if err != nil {
-		logger.Warn(logSender, connectionID, "could not create main filesystem for user %#v err: %v", u.Username, err)
 		return err
 	}
-	fs.CheckRootPath(u.Username, u.GetUID(), u.GetGID())
 	if u.Filters.StartDirectory != "" {
 		err = u.checkDirWithParents(u.Filters.StartDirectory, connectionID)
 		if err != nil {
@@ -227,7 +262,7 @@ func (u *User) CheckFsRoot(connectionID string) error {
 	}
 	for idx := range u.VirtualFolders {
 		v := &u.VirtualFolders[idx]
-		fs, err = u.GetFilesystemForPath(v.VirtualPath, connectionID)
+		fs, err := u.GetFilesystemForPath(v.VirtualPath, connectionID)
 		if err == nil {
 			fs.CheckRootPath(u.Username, u.GetUID(), u.GetGID())
 		}

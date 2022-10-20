@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
@@ -567,6 +581,11 @@ func TestInvalidToken(t *testing.T) {
 	assert.Contains(t, rr.Body.String(), "invalid token claims")
 
 	rr = httptest.NewRecorder()
+	addFolder(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
 	updateFolder(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
@@ -575,6 +594,11 @@ func TestInvalidToken(t *testing.T) {
 	deleteFolder(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
+	server.handleWebAddFolderPost(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
+	assert.Contains(t, rr.Body.String(), "invalid token claims")
 
 	rr = httptest.NewRecorder()
 	server.handleWebUpdateFolderPost(rr, req)
@@ -2130,6 +2154,13 @@ func TestWebUserInvalidClaims(t *testing.T) {
 	server.handleClientGetShares(rr, req)
 	assert.Equal(t, http.StatusForbidden, rr.Code)
 	assert.Contains(t, rr.Body.String(), "Invalid token claims")
+
+	rr = httptest.NewRecorder()
+	req, _ = http.NewRequest(http.MethodGet, webClientViewPDFPath, nil)
+	req.Header.Set("Cookie", fmt.Sprintf("jwt=%v", token["access_token"]))
+	server.handleClientGetPDF(rr, req)
+	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Contains(t, rr.Body.String(), "Invalid token claims")
 }
 
 func TestInvalidClaims(t *testing.T) {
@@ -2448,6 +2479,23 @@ func TestSecureMiddlewareIntegration(t *testing.T) {
 	server.binding.Security.Enabled = false
 	server.binding.Security.updateProxyHeaders()
 	assert.Len(t, server.binding.Security.proxyHeaders, 0)
+}
+
+func TestGetCompressedFileName(t *testing.T) {
+	username := "test"
+	res := getCompressedFileName(username, []string{"single dir"})
+	require.Equal(t, fmt.Sprintf("%s-single dir.zip", username), res)
+	res = getCompressedFileName(username, []string{"file1", "file2"})
+	require.Equal(t, fmt.Sprintf("%s-download.zip", username), res)
+	res = getCompressedFileName(username, []string{"file1.txt"})
+	require.Equal(t, fmt.Sprintf("%s-file1.zip", username), res)
+	// now files with full paths
+	res = getCompressedFileName(username, []string{"/dir/single dir"})
+	require.Equal(t, fmt.Sprintf("%s-single dir.zip", username), res)
+	res = getCompressedFileName(username, []string{"/adir/file1", "/adir/file2"})
+	require.Equal(t, fmt.Sprintf("%s-download.zip", username), res)
+	res = getCompressedFileName(username, []string{"/sub/dir/file1.txt"})
+	require.Equal(t, fmt.Sprintf("%s-file1.zip", username), res)
 }
 
 func TestWebAdminSetupWithInstallCode(t *testing.T) {

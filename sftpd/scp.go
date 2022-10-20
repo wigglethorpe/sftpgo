@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package sftpd
 
 import (
@@ -621,8 +635,10 @@ func (c *scpCommand) readProtocolMessage() (string, error) {
 	return command.String(), err
 }
 
-// send an error message and close the channel
-//nolint:errcheck // we don't check write errors here, we have to close the channel anyway
+// sendErrorMessage sends an error message and close the channel
+// we don't check write errors here, we have to close the channel anyway
+//
+//nolint:errcheck
 func (c *scpCommand) sendErrorMessage(fs vfs.Fs, err error) {
 	c.connection.channel.Write(errMsg)
 	if fs != nil {

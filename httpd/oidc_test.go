@@ -1,11 +1,27 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -16,6 +32,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-chi/jwtauth/v5"
+	"github.com/lestrrat-go/jwx/jwa"
 	"github.com/rs/xid"
 	"github.com/sftpgo/sdk"
 	"github.com/stretchr/testify/assert"
@@ -92,6 +109,11 @@ func TestOIDCInitialization(t *testing.T) {
 		UsernameField:   "preferred_username",
 		RoleField:       "sftpgo_role",
 	}
+	err = config.initialize()
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "oidc: required scope \"openid\" is not set")
+	}
+	config.Scopes = []string{oidc.ScopeOpenID}
 	err = config.initialize()
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "oidc: unable to initialize provider")
@@ -462,7 +484,7 @@ func TestOIDCLoginLogout(t *testing.T) {
 	r.RequestURI = webClientProfilePath
 	r.Header.Set("Cookie", fmt.Sprintf("%v=%v", oidcCookieKey, tokenCookie))
 	server.router.ServeHTTP(rr, r)
-	assert.Equal(t, http.StatusForbidden, rr.Code)
+	assert.Equal(t, http.StatusOK, rr.Code)
 	// the user can access the allowed pages
 	rr = httptest.NewRecorder()
 	r, err = http.NewRequest(http.MethodGet, webClientFilesPath, nil)
@@ -1141,6 +1163,150 @@ func TestOIDCIsAdmin(t *testing.T) {
 	}
 }
 
+func TestParseAdminRole(t *testing.T) {
+	claims := make(map[string]any)
+	rawClaims := []byte(`{
+		"sub": "35666371",
+		"email": "example@example.com",
+		"preferred_username": "Sally",
+		"name": "Sally Tyler",
+		"updated_at": "2018-04-13T22:08:45Z",
+		"given_name": "Sally",
+		"family_name": "Tyler",
+		"params": {
+		  "sftpgo_role": "admin",
+		  "subparams": {
+			"sftpgo_role": "admin",
+			"inner": {
+				"sftpgo_role": ["user","admin"]
+			}
+		  }
+		},
+		"at_hash": "lPLhxI2wjEndc-WfyroDZA",
+		"rt_hash": "mCmxPtA04N-55AxlEUbq-A",
+		"aud": "78d1d040-20c9-0136-5146-067351775fae92920",
+		"exp": 1523664997,
+		"iat": 1523657797
+	  }`)
+	err := json.Unmarshal(rawClaims, &claims)
+	assert.NoError(t, err)
+
+	type test struct {
+		input string
+		want  bool
+	}
+
+	tests := []test{
+		{input: "sftpgo_role", want: false},
+		{input: "params.sftpgo_role", want: true},
+		{input: "params.subparams.sftpgo_role", want: true},
+		{input: "params.subparams.inner.sftpgo_role", want: true},
+		{input: "email", want: false},
+		{input: "missing", want: false},
+		{input: "params.email", want: false},
+		{input: "missing.sftpgo_role", want: false},
+		{input: "params", want: false},
+		{input: "params.subparams.inner.sftpgo_role.missing", want: false},
+	}
+
+	for _, tc := range tests {
+		token := oidcToken{}
+		token.getRoleFromField(claims, tc.input)
+		assert.Equal(t, tc.want, token.isAdmin(), "%q should return %t", tc.input, tc.want)
+	}
+}
+
+func TestOIDCWithLoginFormsDisabled(t *testing.T) {
+	oidcMgr, ok := oidcMgr.(*memoryOIDCManager)
+	require.True(t, ok)
+
+	server := getTestOIDCServer()
+	server.binding.OIDC.ImplicitRoles = true
+	server.binding.EnabledLoginMethods = 3
+	server.binding.EnableWebAdmin = true
+	server.binding.EnableWebClient = true
+	err := server.binding.OIDC.initialize()
+	assert.NoError(t, err)
+	server.initializeRouter()
+	// login with an admin user
+	authReq := newOIDCPendingAuth(tokenAudienceWebAdmin)
+	oidcMgr.addPendingAuth(authReq)
+	token := &oauth2.Token{
+		AccessToken: "1234",
+		Expiry:      time.Now().Add(5 * time.Minute),
+	}
+	token = token.WithExtra(map[string]any{
+		"id_token": "id_token_val",
+	})
+	server.binding.OIDC.oauth2Config = &mockOAuth2Config{
+		tokenSource: &mockTokenSource{},
+		authCodeURL: webOIDCRedirectPath,
+		token:       token,
+	}
+	idToken := &oidc.IDToken{
+		Nonce:  authReq.Nonce,
+		Expiry: time.Now().Add(5 * time.Minute),
+	}
+	setIDTokenClaims(idToken, []byte(`{"preferred_username":"admin","sid":"sid456"}`))
+	server.binding.OIDC.verifier = &mockOIDCVerifier{
+		err:   nil,
+		token: idToken,
+	}
+	rr := httptest.NewRecorder()
+	r, err := http.NewRequest(http.MethodGet, webOIDCRedirectPath+"?state="+authReq.State, nil)
+	assert.NoError(t, err)
+	server.router.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusFound, rr.Code)
+	assert.Equal(t, webUsersPath, rr.Header().Get("Location"))
+	var tokenCookie string
+	for k := range oidcMgr.tokens {
+		tokenCookie = k
+	}
+	// we should be able to create admins without setting a password
+	if csrfTokenAuth == nil {
+		csrfTokenAuth = jwtauth.New(jwa.HS256.String(), util.GenerateRandomBytes(32), nil)
+	}
+	adminUsername := "testAdmin"
+	form := make(url.Values)
+	form.Set(csrfFormToken, createCSRFToken(""))
+	form.Set("username", adminUsername)
+	form.Set("password", "")
+	form.Set("status", "1")
+	form.Set("permissions", "*")
+	rr = httptest.NewRecorder()
+	r, err = http.NewRequest(http.MethodPost, webAdminPath, bytes.NewBuffer([]byte(form.Encode())))
+	assert.NoError(t, err)
+	r.Header.Set("Cookie", fmt.Sprintf("%v=%v", oidcCookieKey, tokenCookie))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	server.router.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusSeeOther, rr.Code)
+	_, err = dataprovider.AdminExists(adminUsername)
+	assert.NoError(t, err)
+	err = dataprovider.DeleteAdmin(adminUsername, "", "")
+	assert.NoError(t, err)
+	// login and password related routes are disabled
+	rr = httptest.NewRecorder()
+	r, err = http.NewRequest(http.MethodPost, webAdminLoginPath, nil)
+	assert.NoError(t, err)
+	server.router.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	rr = httptest.NewRecorder()
+	r, err = http.NewRequest(http.MethodPost, webAdminTwoFactorPath, nil)
+	assert.NoError(t, err)
+	server.router.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+	rr = httptest.NewRecorder()
+	r, err = http.NewRequest(http.MethodPost, webClientLoginPath, nil)
+	assert.NoError(t, err)
+	server.router.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
+	rr = httptest.NewRecorder()
+	r, err = http.NewRequest(http.MethodPost, webClientForgotPwdPath, nil)
+	assert.NoError(t, err)
+	server.router.ServeHTTP(rr, r)
+	assert.Equal(t, http.StatusNotFound, rr.Code)
+}
+
 func TestDbOIDCManager(t *testing.T) {
 	if !isSharedProviderSupported() {
 		t.Skip("this test it is not available with this provider")
@@ -1263,7 +1429,9 @@ func getTestOIDCServer() *httpdServer {
 				UsernameField:   "preferred_username",
 				RoleField:       "sftpgo_role",
 				ImplicitRoles:   false,
+				Scopes:          []string{oidc.ScopeOpenID, "profile", "email"},
 				CustomFields:    nil,
+				Debug:           true,
 			},
 		},
 		enableWebAdmin:  true,

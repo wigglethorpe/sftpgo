@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
@@ -238,6 +252,7 @@ type setupPage struct {
 	Username             string
 	HasInstallationCode  bool
 	InstallationCodeHint string
+	HideSupportLink      bool
 	Error                string
 }
 
@@ -643,6 +658,7 @@ func (s *httpdServer) renderAdminSetupPage(w http.ResponseWriter, r *http.Reques
 		Username:             username,
 		HasInstallationCode:  installationCode != "",
 		InstallationCodeHint: installationCodeHint,
+		HideSupportLink:      hideSupportLink,
 		Error:                error,
 	}
 
@@ -1303,7 +1319,7 @@ func getAdminFromPostFields(r *http.Request) (dataprovider.Admin, error) {
 	}
 	status, err := strconv.Atoi(r.Form.Get("status"))
 	if err != nil {
-		return admin, err
+		return admin, fmt.Errorf("invalid status: %w", err)
 	}
 	admin.Username = r.Form.Get("username")
 	admin.Password = r.Form.Get("password")
@@ -1413,6 +1429,7 @@ func getUserFromTemplate(user dataprovider.User, template userTemplateFields) da
 	user.VirtualFolders = vfolders
 	user.Description = replacePlaceholders(user.Description, replacements)
 	user.AdditionalInfo = replacePlaceholders(user.AdditionalInfo, replacements)
+	user.Filters.StartDirectory = replacePlaceholders(user.Filters.StartDirectory, replacements)
 
 	switch user.FsConfig.Provider {
 	case sdk.CryptedFilesystemProvider:
@@ -1841,6 +1858,9 @@ func (s *httpdServer) handleWebAddAdminPost(w http.ResponseWriter, r *http.Reque
 		s.renderAddUpdateAdminPage(w, r, &admin, err.Error(), true)
 		return
 	}
+	if admin.Password == "" && s.binding.isWebAdminLoginFormDisabled() {
+		admin.Password = util.GenerateUniqueID()
+	}
 	ipAddr := util.GetIPFromRemoteAddress(r.RemoteAddr)
 	if err := verifyCSRFToken(r.Form.Get(csrfFormToken), ipAddr); err != nil {
 		s.renderForbiddenPage(w, r, err.Error())
@@ -2248,8 +2268,13 @@ func (s *httpdServer) handleWebAddFolderGet(w http.ResponseWriter, r *http.Reque
 
 func (s *httpdServer) handleWebAddFolderPost(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestSize)
+	claims, err := getTokenClaims(r)
+	if err != nil || claims.Username == "" {
+		s.renderBadRequestPage(w, r, errors.New("invalid token claims"))
+		return
+	}
 	folder := vfs.BaseVirtualFolder{}
-	err := r.ParseMultipartForm(maxRequestSize)
+	err = r.ParseMultipartForm(maxRequestSize)
 	if err != nil {
 		s.renderFolderPage(w, r, folder, folderPageModeAdd, err.Error())
 		return
@@ -2272,7 +2297,7 @@ func (s *httpdServer) handleWebAddFolderPost(w http.ResponseWriter, r *http.Requ
 	folder.FsConfig = fsConfig
 	folder = getFolderFromTemplate(folder, folder.Name)
 
-	err = dataprovider.AddFolder(&folder)
+	err = dataprovider.AddFolder(&folder, claims.Username, ipAddr)
 	if err == nil {
 		http.Redirect(w, r, webFoldersPath, http.StatusSeeOther)
 	} else {

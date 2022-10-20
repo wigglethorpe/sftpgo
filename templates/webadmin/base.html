@@ -1,3 +1,18 @@
+<!--
+Copyright (C) 2019-2022  Nicola Murino
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, version 3.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+-->
 {{define "base"}}
 <!DOCTYPE html>
 <html lang="en">
@@ -250,8 +265,21 @@
     <script src="{{.StaticURL}}/js/sb-admin-2.min.js"></script>
 
     <script type="text/javascript">
+        function escapeHTML(str) {
+            var div = document.createElement('div');
+            div.appendChild(document.createTextNode(str));
+            return div.innerHTML;
+        }
+
+        function unescapeHTML(escapedStr) {
+            var div = document.createElement('div');
+            div.innerHTML = escapedStr;
+            var child = div.childNodes[0];
+            return child ? child.nodeValue : '';
+        }
+
         function fixedEncodeURIComponent(str) {
-            return encodeURIComponent(str).replace(/[!'()*]/g, function (c) {
+            return encodeURIComponent(unescapeHTML(str)).replace(/[!'()*]/g, function (c) {
                 return '%' + c.charCodeAt(0).toString(16);
             });
         }

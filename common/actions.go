@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package common
 
 import (
@@ -28,7 +42,16 @@ var (
 	errUnconfiguredAction    = errors.New("no hook is configured for this action")
 	errNoHook                = errors.New("unable to execute action, no hook defined")
 	errUnexpectedHTTResponse = errors.New("unexpected HTTP response code")
+	hooksConcurrencyGuard    = make(chan struct{}, 150)
 )
+
+func startNewHook() {
+	hooksConcurrencyGuard <- struct{}{}
+}
+
+func hookEnded() {
+	<-hooksConcurrencyGuard
+}
 
 // ProtocolActions defines the action to execute on file operations and SSH commands
 type ProtocolActions struct {
@@ -102,7 +125,12 @@ func ExecuteActionNotification(conn *BaseConnection, operation, filePath, virtua
 			return
 		}
 
-		go actionHandler.Handle(notification) //nolint:errcheck
+		go func() {
+			startNewHook()
+			defer hookEnded()
+
+			actionHandler.Handle(notification) //nolint:errcheck
+		}()
 	}
 }
 

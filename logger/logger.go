@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 // Package logger provides logging capabilities.
 // It is a wrapper around zerolog for logging and lumberjack for log rotation.
 // Logs are written to the specified log file.
@@ -213,6 +227,7 @@ func CommandLog(command, path, target, user, fileMode, connectionID, protocol st
 	logger.Info().
 		Timestamp().
 		Str("sender", command).
+		Str("local_addr", localAddr).
 		Str("remote_addr", remoteAddr).
 		Str("username", user).
 		Str("file_path", path).
@@ -221,7 +236,7 @@ func CommandLog(command, path, target, user, fileMode, connectionID, protocol st
 		Int("uid", uid).
 		Int("gid", gid).
 		Str("access_time", atime).
-		Str("modification_time", atime).
+		Str("modification_time", mtime).
 		Int64("size", size).
 		Str("ssh_command", sshCommand).
 		Str("connection_id", connectionID).

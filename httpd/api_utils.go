@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
@@ -207,9 +221,18 @@ func renderAPIDirContents(w http.ResponseWriter, r *http.Request, contents []os.
 	render.JSON(w, r, results)
 }
 
+func getCompressedFileName(username string, files []string) string {
+	if len(files) == 1 {
+		name := path.Base(files[0])
+		return fmt.Sprintf("%s-%s.zip", username, strings.TrimSuffix(name, path.Ext(name)))
+	}
+	return fmt.Sprintf("%s-download.zip", username)
+}
+
 func renderCompressedFiles(w http.ResponseWriter, conn *Connection, baseDir string, files []string,
 	share *dataprovider.Share,
 ) {
+	conn.User.CheckFsRoot(conn.ID) //nolint:errcheck
 	w.Header().Set("Content-Type", "application/zip")
 	w.Header().Set("Accept-Ranges", "none")
 	w.Header().Set("Content-Transfer-Encoding", "binary")
@@ -304,6 +327,7 @@ func checkDownloadFileFromShare(share *dataprovider.Share, info os.FileInfo) err
 func downloadFile(w http.ResponseWriter, r *http.Request, connection *Connection, name string,
 	info os.FileInfo, inline bool, share *dataprovider.Share,
 ) (int, error) {
+	connection.User.CheckFsRoot(connection.ID) //nolint:errcheck
 	err := checkDownloadFileFromShare(share, info)
 	if err != nil {
 		return http.StatusBadRequest, err
@@ -429,7 +453,7 @@ func checkIfRange(r *http.Request, modtime time.Time) condResult {
 	if err != nil {
 		return condFalse
 	}
-	if modtime.Add(60 * time.Second).Before(t) {
+	if modtime.Unix() == t.Unix() {
 		return condTrue
 	}
 	return condFalse

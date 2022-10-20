@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 // Package common defines code shared among file transfer packages and protocols
 package common
 
@@ -593,6 +607,9 @@ func (c *Configuration) ExecuteStartupHook() error {
 }
 
 func (c *Configuration) executePostDisconnectHook(remoteAddr, protocol, username, connID string, connectionTime time.Time) {
+	startNewHook()
+	defer hookEnded()
+
 	ipAddr := util.GetIPFromRemoteAddress(remoteAddr)
 	connDuration := int64(time.Since(connectionTime) / time.Millisecond)
 
@@ -845,6 +862,15 @@ func (conns *ActiveConnections) Remove(connectionID string) {
 			metric.UpdateActiveConnectionsSize(lastIdx)
 			logger.Debug(conn.GetProtocol(), conn.GetID(), "connection removed, local address %#v, remote address %#v close fs error: %v, num open connections: %v",
 				conn.GetLocalAddress(), conn.GetRemoteAddress(), err, lastIdx)
+			if conn.GetProtocol() == ProtocolFTP && conn.GetUsername() == "" {
+				ip := util.GetIPFromRemoteAddress(conn.GetRemoteAddress())
+				logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, conn.GetProtocol(),
+					dataprovider.ErrNoAuthTryed.Error())
+				metric.AddNoAuthTryed()
+				AddDefenderEvent(ip, HostEventNoLoginTried)
+				dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTryed, ip,
+					conn.GetProtocol(), dataprovider.ErrNoAuthTryed)
+			}
 			Config.checkPostDisconnectHook(conn.GetRemoteAddress(), conn.GetProtocol(), conn.GetUsername(),
 				conn.GetID(), conn.GetConnectionTime())
 			return
@@ -933,19 +959,11 @@ func (conns *ActiveConnections) checkIdles() {
 		isUnauthenticatedFTPUser := (c.GetProtocol() == ProtocolFTP && c.GetUsername() == "")
 
 		if idleTime > Config.idleTimeoutAsDuration || (isUnauthenticatedFTPUser && idleTime > Config.idleLoginTimeout) {
-			defer func(conn ActiveConnection, isFTPNoAuth bool) {
+			defer func(conn ActiveConnection) {
 				err := conn.Disconnect()
 				logger.Debug(conn.GetProtocol(), conn.GetID(), "close idle connection, idle time: %v, username: %#v close err: %v",
 					time.Since(conn.GetLastActivity()), conn.GetUsername(), err)
-				if isFTPNoAuth {
-					ip := util.GetIPFromRemoteAddress(c.GetRemoteAddress())
-					logger.ConnectionFailedLog("", ip, dataprovider.LoginMethodNoAuthTryed, c.GetProtocol(), "client idle")
-					metric.AddNoAuthTryed()
-					AddDefenderEvent(ip, HostEventNoLoginTried)
-					dataprovider.ExecutePostLoginHook(&dataprovider.User{}, dataprovider.LoginMethodNoAuthTryed, ip, c.GetProtocol(),
-						dataprovider.ErrNoAuthTryed)
-				}
-			}(c, isUnauthenticatedFTPUser)
+			}(c)
 		}
 	}
 

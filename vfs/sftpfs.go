@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package vfs
 
 import (
@@ -281,15 +295,15 @@ func (fs *SFTPFs) Open(name string, offset int64) (File, *pipeat.PipeReaderAt, f
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	if fs.config.BufferSize == 0 {
-		return f, nil, nil, err
-	}
 	if offset > 0 {
 		_, err = f.Seek(offset, io.SeekStart)
 		if err != nil {
 			f.Close()
 			return nil, nil, nil, err
 		}
+	}
+	if fs.config.BufferSize == 0 {
+		return f, nil, nil, nil
 	}
 	r, w, err := pipeat.PipeInDir(fs.localTempDir)
 	if err != nil {
@@ -493,11 +507,9 @@ func (*SFTPFs) IsNotSupported(err error) bool {
 
 // CheckRootPath creates the specified local root directory if it does not exists
 func (fs *SFTPFs) CheckRootPath(username string, uid int, gid int) bool {
-	if fs.config.BufferSize > 0 {
-		// we need a local directory for temporary files
-		osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
-		osFs.CheckRootPath(username, uid, gid)
-	}
+	// we need a local directory for temporary files
+	osFs := NewOsFs(fs.ConnectionID(), fs.localTempDir, "")
+	osFs.CheckRootPath(username, uid, gid)
 	if fs.config.Prefix == "/" {
 		return true
 	}

@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 // Package dataprovider provides data access.
 // It abstracts different data providers and exposes a common API.
 package dataprovider
@@ -156,26 +170,44 @@ var (
 	sharedProviders              = []string{PGSQLDataProviderName, MySQLDataProviderName, CockroachDataProviderName}
 	logSender                    = "dataprovider"
 	credentialsDirPath           string
-	sqlTableUsers                = "users"
-	sqlTableFolders              = "folders"
-	sqlTableFoldersMapping       = "folders_mapping"
-	sqlTableUsersFoldersMapping  = "users_folders_mapping"
-	sqlTableAdmins               = "admins"
-	sqlTableAPIKeys              = "api_keys"
-	sqlTableShares               = "shares"
-	sqlTableDefenderHosts        = "defender_hosts"
-	sqlTableDefenderEvents       = "defender_events"
-	sqlTableActiveTransfers      = "active_transfers"
-	sqlTableGroups               = "groups"
-	sqlTableUsersGroupsMapping   = "users_groups_mapping"
-	sqlTableGroupsFoldersMapping = "groups_folders_mapping"
-	sqlTableSharedSessions       = "shared_sessions"
-	sqlTableSchemaVersion        = "schema_version"
+	sqlTableUsers                string
+	sqlTableFolders              string
+	sqlTableFoldersMapping       string
+	sqlTableUsersFoldersMapping  string
+	sqlTableAdmins               string
+	sqlTableAPIKeys              string
+	sqlTableShares               string
+	sqlTableDefenderHosts        string
+	sqlTableDefenderEvents       string
+	sqlTableActiveTransfers      string
+	sqlTableGroups               string
+	sqlTableUsersGroupsMapping   string
+	sqlTableGroupsFoldersMapping string
+	sqlTableSharedSessions       string
+	sqlTableSchemaVersion        string
 	argon2Params                 *argon2id.Params
 	lastLoginMinDelay            = 10 * time.Minute
 	usernameRegex                = regexp.MustCompile("^[a-zA-Z0-9-_.~]+$")
 	tempPath                     string
 )
+
+func initSQLTables() {
+	sqlTableUsers = "users"
+	sqlTableFolders = "folders"
+	sqlTableFoldersMapping = "folders_mapping"
+	sqlTableUsersFoldersMapping = "users_folders_mapping"
+	sqlTableAdmins = "admins"
+	sqlTableAPIKeys = "api_keys"
+	sqlTableShares = "shares"
+	sqlTableDefenderHosts = "defender_hosts"
+	sqlTableDefenderEvents = "defender_events"
+	sqlTableActiveTransfers = "active_transfers"
+	sqlTableGroups = "groups"
+	sqlTableUsersGroupsMapping = "users_groups_mapping"
+	sqlTableGroupsFoldersMapping = "groups_folders_mapping"
+	sqlTableSharedSessions = "shared_sessions"
+	sqlTableSchemaVersion = "schema_version"
+}
 
 type schemaVersion struct {
 	Version int
@@ -216,6 +248,24 @@ type PasswordValidation struct {
 	Admins PasswordValidationRules `json:"admins" mapstructure:"admins"`
 	// Password validation rules for SFTPGo protocol users
 	Users PasswordValidationRules `json:"users" mapstructure:"users"`
+}
+
+type wrappedFolder struct {
+	Folder vfs.BaseVirtualFolder
+}
+
+func (w *wrappedFolder) RenderAsJSON(reload bool) ([]byte, error) {
+	if reload {
+		folder, err := provider.getFolderByName(w.Folder.Name)
+		if err != nil {
+			providerLog(logger.LevelError, "unable to reload folder before rendering as json: %v", err)
+			return nil, err
+		}
+		folder.PrepareForRendering()
+		return json.Marshal(folder)
+	}
+	w.Folder.PrepareForRendering()
+	return json.Marshal(w.Folder)
 }
 
 // ObjectsActions defines the action to execute on user create, update, delete for the specified objects
@@ -707,11 +757,18 @@ func SetTempPath(fsPath string) {
 	tempPath = fsPath
 }
 
+func checkSharedMode() {
+	if !util.Contains(sharedProviders, config.Driver) {
+		config.IsShared = 0
+	}
+}
+
 // Initialize the data provider.
 // An error is returned if the configured driver is invalid or if the data provider cannot be initialized
 func Initialize(cnf Config, basePath string, checkAdmins bool) error {
 	var err error
 	config = cnf
+	checkSharedMode()
 	config.Actions.ExecuteOn = util.RemoveDuplicates(config.Actions.ExecuteOn, true)
 	config.Actions.ExecuteFor = util.RemoveDuplicates(config.Actions.ExecuteFor, true)
 
@@ -822,6 +879,7 @@ func initializeHashingAlgo(cnf *Config) error {
 }
 
 func validateSQLTablesPrefix() error {
+	initSQLTables()
 	if config.SQLTablesPrefix != "" {
 		for _, char := range config.SQLTablesPrefix {
 			if !strings.Contains(sqlPrefixValidChars, strings.ToLower(string(char))) {
@@ -831,17 +889,24 @@ func validateSQLTablesPrefix() error {
 		sqlTableUsers = config.SQLTablesPrefix + sqlTableUsers
 		sqlTableFolders = config.SQLTablesPrefix + sqlTableFolders
 		sqlTableFoldersMapping = config.SQLTablesPrefix + sqlTableFoldersMapping
+		sqlTableUsersFoldersMapping = config.SQLTablesPrefix + sqlTableUsersFoldersMapping
 		sqlTableAdmins = config.SQLTablesPrefix + sqlTableAdmins
 		sqlTableAPIKeys = config.SQLTablesPrefix + sqlTableAPIKeys
 		sqlTableShares = config.SQLTablesPrefix + sqlTableShares
 		sqlTableDefenderEvents = config.SQLTablesPrefix + sqlTableDefenderEvents
 		sqlTableDefenderHosts = config.SQLTablesPrefix + sqlTableDefenderHosts
 		sqlTableActiveTransfers = config.SQLTablesPrefix + sqlTableActiveTransfers
+		sqlTableGroups = config.SQLTablesPrefix + sqlTableGroups
+		sqlTableUsersGroupsMapping = config.SQLTablesPrefix + sqlTableUsersGroupsMapping
+		sqlTableGroupsFoldersMapping = config.SQLTablesPrefix + sqlTableGroupsFoldersMapping
+		sqlTableSharedSessions = config.SQLTablesPrefix + sqlTableSharedSessions
 		sqlTableSchemaVersion = config.SQLTablesPrefix + sqlTableSchemaVersion
-		providerLog(logger.LevelDebug, "sql table for users %#v, folders %#v folders mapping %#v admins %#v "+
-			"api keys %#v shares %#v defender hosts %#v defender events %#v transfers %#v schema version %#v",
-			sqlTableUsers, sqlTableFolders, sqlTableFoldersMapping, sqlTableAdmins, sqlTableAPIKeys,
-			sqlTableShares, sqlTableDefenderHosts, sqlTableDefenderEvents, sqlTableActiveTransfers, sqlTableSchemaVersion)
+		providerLog(logger.LevelDebug, "sql table for users %q, folders %q users folders mapping %q admins %q "+
+			"api keys %q shares %q defender hosts %q defender events %q transfers %q  groups %q "+
+			"users groups mapping %q groups folders mapping %q shared sessions %q schema version %q",
+			sqlTableUsers, sqlTableFolders, sqlTableUsersFoldersMapping, sqlTableAdmins, sqlTableAPIKeys,
+			sqlTableShares, sqlTableDefenderHosts, sqlTableDefenderEvents, sqlTableActiveTransfers, sqlTableGroups,
+			sqlTableUsersGroupsMapping, sqlTableGroupsFoldersMapping, sqlTableSharedSessions, sqlTableSchemaVersion)
 	}
 	return nil
 }
@@ -934,6 +999,9 @@ func CheckAdminAndPass(username, password, ip string) (Admin, error) {
 
 // CheckCachedUserCredentials checks the credentials for a cached user
 func CheckCachedUserCredentials(user *CachedUser, password, loginMethod, protocol string, tlsCert *x509.Certificate) error {
+	if err := user.User.CheckLoginConditions(); err != nil {
+		return err
+	}
 	if loginMethod != LoginMethodPassword {
 		_, err := checkUserAndTLSCertificate(&user.User, protocol, tlsCert)
 		if err != nil {
@@ -945,9 +1013,6 @@ func CheckCachedUserCredentials(user *CachedUser, password, loginMethod, protoco
 			}
 			return nil
 		}
-	}
-	if err := user.User.CheckLoginConditions(); err != nil {
-		return err
 	}
 	if password == "" {
 		return ErrInvalidCredentials
@@ -1726,15 +1791,20 @@ func GetUsersForQuotaCheck(toFetch map[string]bool) ([]User, error) {
 }
 
 // AddFolder adds a new virtual folder.
-func AddFolder(folder *vfs.BaseVirtualFolder) error {
+func AddFolder(folder *vfs.BaseVirtualFolder, executor, ipAddress string) error {
 	folder.Name = config.convertName(folder.Name)
-	return provider.addFolder(folder)
+	err := provider.addFolder(folder)
+	if err == nil {
+		executeAction(operationAdd, executor, ipAddress, actionObjectFolder, folder.Name, &wrappedFolder{Folder: *folder})
+	}
+	return err
 }
 
 // UpdateFolder updates the specified virtual folder
 func UpdateFolder(folder *vfs.BaseVirtualFolder, users []string, groups []string, executor, ipAddress string) error {
 	err := provider.updateFolder(folder)
 	if err == nil {
+		executeAction(operationUpdate, executor, ipAddress, actionObjectFolder, folder.Name, &wrappedFolder{Folder: *folder})
 		usersInGroups, errGrp := provider.getUsersInGroups(groups)
 		if errGrp == nil {
 			users = append(users, usersInGroups...)
@@ -1765,6 +1835,7 @@ func DeleteFolder(folderName, executor, ipAddress string) error {
 	}
 	err = provider.deleteFolder(folder)
 	if err == nil {
+		executeAction(operationDelete, executor, ipAddress, actionObjectFolder, folder.Name, &wrappedFolder{Folder: folder})
 		users := folder.Users
 		usersInGroups, errGrp := provider.getUsersInGroups(folder.Groups)
 		if errGrp == nil {
@@ -3326,6 +3397,11 @@ func ExecutePostLoginHook(user *User, loginMethod, ip, protocol string, err erro
 	}
 
 	go func() {
+		actionsConcurrencyGuard <- struct{}{}
+		defer func() {
+			<-actionsConcurrencyGuard
+		}()
+
 		status := "0"
 		if err == nil {
 			status = "1"

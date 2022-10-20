@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package dataprovider
 
 import (
@@ -29,10 +43,15 @@ const (
 
 const (
 	actionObjectUser   = "user"
+	actionObjectFolder = "folder"
 	actionObjectGroup  = "group"
 	actionObjectAdmin  = "admin"
 	actionObjectAPIKey = "api_key"
 	actionObjectShare  = "share"
+)
+
+var (
+	actionsConcurrencyGuard = make(chan struct{}, 100)
 )
 
 func executeAction(operation, executor, ip, objectType, objectName string, object plugin.Renderer) {
@@ -55,6 +74,11 @@ func executeAction(operation, executor, ip, objectType, objectName string, objec
 	}
 
 	go func() {
+		actionsConcurrencyGuard <- struct{}{}
+		defer func() {
+			<-actionsConcurrencyGuard
+		}()
+
 		dataAsJSON, err := object.RenderAsJSON(operation != operationDelete)
 		if err != nil {
 			providerLog(logger.LevelError, "unable to serialize user as JSON for operation %#v: %v", operation, err)

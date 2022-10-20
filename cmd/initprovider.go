@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package cmd
 
 import (
@@ -34,6 +48,7 @@ To initialize/update the data provider from the configuration directory simply u
 
 $ sftpgo initprovider
 
+Any defined action is ignored.
 Please take a look at the usage below to customize the options.`,
 		Run: func(cmd *cobra.Command, args []string) {
 			logger.DisableLogger()
@@ -51,6 +66,10 @@ Please take a look at the usage below to customize the options.`,
 				os.Exit(1)
 			}
 			providerConf := config.GetProviderConf()
+			// ignore actions
+			providerConf.Actions.Hook = ""
+			providerConf.Actions.ExecuteFor = nil
+			providerConf.Actions.ExecuteOn = nil
 			logger.InfoToConsole("Initializing provider: %#v config file: %#v", providerConf.Driver, viper.ConfigFileUsed())
 			err = dataprovider.InitializeDatabase(providerConf, configDir)
 			if err == nil {

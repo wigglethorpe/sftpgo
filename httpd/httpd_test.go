@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd_test
 
 import (
@@ -166,6 +180,7 @@ const (
 	webClientForgotPwdPath          = "/web/client/forgot-password"
 	webClientResetPwdPath           = "/web/client/reset-password"
 	webClientViewPDFPath            = "/web/client/viewpdf"
+	webClientGetPDFPath             = "/web/client/getpdf"
 	httpBaseURL                     = "http://127.0.0.1:8081"
 	defaultRemoteAddr               = "127.0.0.1:1234"
 	sftpServerAddr                  = "127.0.0.1:8022"
@@ -517,6 +532,39 @@ func TestInitialization(t *testing.T) {
 	err = httpdConf.Initialize(configDir, isShared)
 	if assert.Error(t, err) {
 		assert.Contains(t, err.Error(), "oidc")
+	}
+	httpdConf.Bindings[0].OIDC = httpd.OIDC{}
+	httpdConf.Bindings[0].EnableWebClient = true
+	httpdConf.Bindings[0].EnableWebAdmin = true
+	httpdConf.Bindings[0].EnabledLoginMethods = 1
+	err = httpdConf.Initialize(configDir, isShared)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "no login method available for WebAdmin UI")
+	}
+	httpdConf.Bindings[0].EnabledLoginMethods = 2
+	err = httpdConf.Initialize(configDir, isShared)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "no login method available for WebAdmin UI")
+	}
+	httpdConf.Bindings[0].EnabledLoginMethods = 6
+	err = httpdConf.Initialize(configDir, isShared)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "no login method available for WebClient UI")
+	}
+	httpdConf.Bindings[0].EnabledLoginMethods = 4
+	err = httpdConf.Initialize(configDir, isShared)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "no login method available for WebClient UI")
+	}
+	httpdConf.Bindings[0].EnabledLoginMethods = 3
+	err = httpdConf.Initialize(configDir, isShared)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "no login method available for WebAdmin UI")
+	}
+	httpdConf.Bindings[0].EnableWebAdmin = false
+	err = httpdConf.Initialize(configDir, isShared)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "no login method available for WebClient UI")
 	}
 }
 
@@ -1502,25 +1550,17 @@ func TestPermMFADisabled(t *testing.T) {
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
-	user.Filters.RecoveryCodes = []dataprovider.RecoveryCode{
-		{
-			Secret: kms.NewPlainSecret(util.GenerateUniqueID()),
-		},
-	}
-	user, resp, err = httpdtest.UpdateUser(user, http.StatusOK, "")
-	assert.NoError(t, err, string(resp))
-	assert.Contains(t, user.Filters.WebClient, sdk.WebClientMFADisabled)
-	assert.Len(t, user.Filters.RecoveryCodes, 12)
-
 	req, err = http.NewRequest(http.MethodGet, user2FARecoveryCodesPath, nil)
 	assert.NoError(t, err)
 	setBearerForReq(req, token)
 	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
-	var recCodes []recoveryCode
-	err = json.Unmarshal(rr.Body.Bytes(), &recCodes)
+	checkResponseCode(t, http.StatusForbidden, rr)
+
+	req, err = http.NewRequest(http.MethodPost, user2FARecoveryCodesPath, nil)
 	assert.NoError(t, err)
-	assert.Len(t, recCodes, 12)
+	setBearerForReq(req, token)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
 
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -1733,6 +1773,11 @@ func TestLoginAdminAPITOTP(t *testing.T) {
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
+	admin, _, err = httpdtest.GetAdminByUsername(admin.Username, http.StatusOK)
+	assert.NoError(t, err)
+	assert.True(t, admin.Filters.TOTPConfig.Enabled)
+	assert.Len(t, admin.Filters.RecoveryCodes, 12)
+
 	req, err = http.NewRequest(http.MethodGet, fmt.Sprintf("%v%v", httpBaseURL, tokenPath), nil)
 	assert.NoError(t, err)
 	req.SetBasicAuth(altAdminUsername, altAdminPassword)
@@ -1777,6 +1822,46 @@ func TestLoginAdminAPITOTP(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	err = resp.Body.Close()
 	assert.NoError(t, err)
+	// get/set recovery codes
+	req, err = http.NewRequest(http.MethodGet, admin2FARecoveryCodesPath, nil)
+	assert.NoError(t, err)
+	setBearerForReq(req, altToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	req, err = http.NewRequest(http.MethodPost, admin2FARecoveryCodesPath, nil)
+	assert.NoError(t, err)
+	setBearerForReq(req, altToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	// disable two-factor auth
+	saveReq := make(map[string]bool)
+	saveReq["enabled"] = false
+	asJSON, err = json.Marshal(saveReq)
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodPost, adminTOTPSavePath, bytes.NewBuffer(asJSON))
+	assert.NoError(t, err)
+	setBearerForReq(req, altToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	admin, _, err = httpdtest.GetAdminByUsername(admin.Username, http.StatusOK)
+	assert.NoError(t, err)
+	assert.False(t, admin.Filters.TOTPConfig.Enabled)
+	assert.Len(t, admin.Filters.RecoveryCodes, 0)
+	// get/set recovery codes will not work
+	req, err = http.NewRequest(http.MethodGet, admin2FARecoveryCodesPath, nil)
+	assert.NoError(t, err)
+	setBearerForReq(req, altToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
+
+	req, err = http.NewRequest(http.MethodPost, admin2FARecoveryCodesPath, nil)
+	assert.NoError(t, err)
+	setBearerForReq(req, altToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
 
 	_, err = httpdtest.RemoveAdmin(admin, http.StatusOK)
 	assert.NoError(t, err)
@@ -4279,6 +4364,62 @@ func TestCloseConnectionAfterUserUpdateDelete(t *testing.T) {
 	assert.Len(t, common.Connections.GetStats(), 0)
 }
 
+func TestAdminGenerateRecoveryCodesSaveError(t *testing.T) {
+	err := dataprovider.Close()
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, "")
+	assert.NoError(t, err)
+	providerConf := config.GetProviderConf()
+	providerConf.NamingRules = 7
+	err = dataprovider.Initialize(providerConf, configDir, true)
+	assert.NoError(t, err)
+
+	a := getTestAdmin()
+	a.Username = "adMiN@example.com "
+	admin, _, err := httpdtest.AddAdmin(a, http.StatusCreated)
+	assert.NoError(t, err)
+	configName, _, secret, _, err := mfa.GenerateTOTPSecret(mfa.GetAvailableTOTPConfigNames()[0], admin.Username)
+	assert.NoError(t, err)
+	admin.Filters.TOTPConfig = dataprovider.AdminTOTPConfig{
+		Enabled:    true,
+		ConfigName: configName,
+		Secret:     kms.NewPlainSecret(secret),
+	}
+	admin.Password = defaultTokenAuthPass
+	err = dataprovider.UpdateAdmin(&admin, "", "")
+	assert.NoError(t, err)
+	admin, _, err = httpdtest.GetAdminByUsername(a.Username, http.StatusOK)
+	assert.NoError(t, err)
+	assert.True(t, admin.Filters.TOTPConfig.Enabled)
+
+	passcode, err := generateTOTPPasscode(secret)
+	assert.NoError(t, err)
+	adminAPIToken, err := getJWTAPITokenFromTestServerWithPasscode(a.Username, defaultTokenAuthPass, passcode)
+	assert.NoError(t, err)
+	assert.NotEmpty(t, adminAPIToken)
+
+	err = dataprovider.Close()
+	assert.NoError(t, err)
+	err = config.LoadConfig(configDir, "")
+	assert.NoError(t, err)
+	providerConf = config.GetProviderConf()
+	providerConf.BackupsPath = backupsPath
+	err = dataprovider.Initialize(providerConf, configDir, true)
+	assert.NoError(t, err)
+	if config.GetProviderConf().Driver == dataprovider.MemoryDataProviderName {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, admin2FARecoveryCodesPath, nil)
+	assert.NoError(t, err)
+	setBearerForReq(req, adminAPIToken)
+	rr := executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "the following characters are allowed")
+
+	_, err = httpdtest.RemoveAdmin(admin, http.StatusOK)
+	assert.NoError(t, err)
+}
+
 func TestNamingRules(t *testing.T) {
 	smtpCfg := smtp.Config{
 		Host:          "127.0.0.1",
@@ -4302,12 +4443,24 @@ func TestNamingRules(t *testing.T) {
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 	assert.Equal(t, "user@user.me", user.Username)
+	configName, _, secret, _, err := mfa.GenerateTOTPSecret(mfa.GetAvailableTOTPConfigNames()[0], user.Username)
+	assert.NoError(t, err)
+	user.Filters.TOTPConfig = dataprovider.UserTOTPConfig{
+		Enabled:    true,
+		ConfigName: configName,
+		Secret:     kms.NewPlainSecret(secret),
+		Protocols:  []string{common.ProtocolSSH},
+	}
+	user.Password = u.Password
+	err = dataprovider.UpdateUser(&user, "", "")
+	assert.NoError(t, err)
 	user.Username = u.Username
 	user.AdditionalInfo = "info"
 	user, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
 	assert.NoError(t, err)
 	user, _, err = httpdtest.GetUserByUsername(u.Username, http.StatusOK)
 	assert.NoError(t, err)
+	assert.True(t, user.Filters.TOTPConfig.Enabled)
 
 	a := getTestAdmin()
 	a.Username = "admiN@example.com "
@@ -4460,12 +4613,6 @@ func TestNamingRules(t *testing.T) {
 	checkResponseCode(t, http.StatusBadRequest, rr)
 	assert.Contains(t, rr.Body.String(), "the following characters are allowed")
 
-	req, err = http.NewRequest(http.MethodPost, admin2FARecoveryCodesPath, nil)
-	assert.NoError(t, err)
-	setBearerForReq(req, adminAPIToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusBadRequest, rr)
-	assert.Contains(t, rr.Body.String(), "the following characters are allowed")
 	// test admin reset password
 	form = make(url.Values)
 	form.Set("username", admin.Username)
@@ -5405,9 +5552,25 @@ func TestLoaddata(t *testing.T) {
 	user := getTestUser()
 	user.ID = 1
 	user.Username = "test_user_restore"
+	user.VirtualFolders = append(user.VirtualFolders, vfs.VirtualFolder{
+		BaseVirtualFolder: vfs.BaseVirtualFolder{
+			Name: folderName,
+		},
+		VirtualPath: "/vuserpath",
+	})
 	group := getTestGroup()
 	group.ID = 1
 	group.Name = "test_group_restore"
+	group.VirtualFolders = append(group.VirtualFolders, vfs.VirtualFolder{
+		BaseVirtualFolder: vfs.BaseVirtualFolder{
+			Name: folderName,
+		},
+		VirtualPath: "/vgrouppath",
+	})
+	user.Groups = append(user.Groups, sdk.GroupMapping{
+		Name: group.Name,
+		Type: sdk.GroupTypePrimary,
+	})
 	admin := getTestAdmin()
 	admin.ID = 1
 	admin.Username = "test_admin_restore"
@@ -5467,22 +5630,21 @@ func TestLoaddata(t *testing.T) {
 		assert.NoError(t, err)
 	}
 	// add user, group, folder, admin, API key, share from backup
-	_, _, err = httpdtest.Loaddata(backupFilePath, "1", "", http.StatusOK)
-	assert.NoError(t, err)
+	_, resp, err := httpdtest.Loaddata(backupFilePath, "1", "", http.StatusOK)
+	assert.NoError(t, err, string(resp))
 	// update from backup
 	_, _, err = httpdtest.Loaddata(backupFilePath, "2", "", http.StatusOK)
 	assert.NoError(t, err)
 	user, _, err = httpdtest.GetUserByUsername(user.Username, http.StatusOK)
 	assert.NoError(t, err)
+	assert.Len(t, user.VirtualFolders, 1)
+	assert.Len(t, user.Groups, 1)
 	_, err = dataprovider.ShareExists(share.ShareID, user.Username)
-	assert.NoError(t, err)
-	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 
 	group, _, err = httpdtest.GetGroupByName(group.Name, http.StatusOK)
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveGroup(group, http.StatusOK)
-	assert.NoError(t, err)
+	assert.Len(t, group.VirtualFolders, 1)
 
 	admin, _, err = httpdtest.GetAdminByUsername(admin.Username, http.StatusOK)
 	assert.NoError(t, err)
@@ -5491,8 +5653,28 @@ func TestLoaddata(t *testing.T) {
 
 	apiKey, _, err = httpdtest.GetAPIKeyByID(apiKey.KeyID, http.StatusOK)
 	assert.NoError(t, err)
-	_, err = httpdtest.RemoveAPIKey(apiKey, http.StatusOK)
+
+	response, _, err := httpdtest.Dumpdata("", "1", "0", http.StatusOK)
 	assert.NoError(t, err)
+	var dumpedData dataprovider.BackupData
+	data, err := json.Marshal(response)
+	assert.NoError(t, err)
+	err = json.Unmarshal(data, &dumpedData)
+	assert.NoError(t, err)
+	found := false
+	if assert.GreaterOrEqual(t, len(dumpedData.Users), 1) {
+		for _, u := range dumpedData.Users {
+			if u.Username == user.Username {
+				found = true
+				assert.Equal(t, len(user.VirtualFolders), len(u.VirtualFolders))
+				assert.Equal(t, len(user.Groups), len(u.Groups))
+			}
+		}
+	}
+	assert.True(t, found)
+	if assert.Len(t, dumpedData.Groups, 1) {
+		assert.Equal(t, len(group.VirtualFolders), len(dumpedData.Groups[0].VirtualFolders))
+	}
 
 	folder, _, err := httpdtest.GetFolderByName(folderName, http.StatusOK)
 	assert.NoError(t, err)
@@ -5501,9 +5683,16 @@ func TestLoaddata(t *testing.T) {
 	assert.Equal(t, 456, folder.UsedQuotaFiles)
 	assert.Equal(t, int64(789), folder.LastQuotaUpdate)
 	assert.Equal(t, foldeDesc, folder.Description)
-	assert.Len(t, folder.Users, 0)
+	assert.Len(t, folder.Users, 1)
 	_, err = httpdtest.RemoveFolder(folder, http.StatusOK)
 	assert.NoError(t, err)
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveGroup(group, http.StatusOK)
+	assert.NoError(t, err)
+	_, err = httpdtest.RemoveAPIKey(apiKey, http.StatusOK)
+	assert.NoError(t, err)
+
 	err = os.Remove(backupFilePath)
 	assert.NoError(t, err)
 	err = createTestFile(backupFilePath, 10485761)
@@ -6391,23 +6580,24 @@ func TestAdminTOTP(t *testing.T) {
 	assert.NoError(t, err, string(resp))
 	assert.True(t, admin.Filters.TOTPConfig.Enabled)
 	assert.Len(t, admin.Filters.RecoveryCodes, 12)
-	// if we use token we should get no recovery codes
+	// if we use token we cannot get or generate recovery codes
 	req, err = http.NewRequest(http.MethodGet, admin2FARecoveryCodesPath, nil)
 	assert.NoError(t, err)
 	setBearerForReq(req, token)
 	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
-	var recCodes []recoveryCode
-	err = json.Unmarshal(rr.Body.Bytes(), &recCodes)
+	checkResponseCode(t, http.StatusForbidden, rr)
+	req, err = http.NewRequest(http.MethodPost, admin2FARecoveryCodesPath, nil)
 	assert.NoError(t, err)
-	assert.Len(t, recCodes, 0)
+	setBearerForReq(req, token)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
 	// now the same but with altToken
 	req, err = http.NewRequest(http.MethodGet, admin2FARecoveryCodesPath, nil)
 	assert.NoError(t, err)
 	setBearerForReq(req, altToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
-	recCodes = nil
+	var recCodes []recoveryCode
 	err = json.Unmarshal(rr.Body.Bytes(), &recCodes)
 	assert.NoError(t, err)
 	assert.Len(t, recCodes, 12)
@@ -9517,6 +9707,13 @@ func TestMaxSessions(t *testing.T) {
 	checkResponseCode(t, http.StatusTooManyRequests, rr)
 	assert.Contains(t, rr.Body.String(), "too many open sessions")
 
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=file", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusTooManyRequests, rr)
+	assert.Contains(t, rr.Body.String(), "too many open sessions")
+
 	// test reset password
 	smtpCfg := smtp.Config{
 		Host:          "127.0.0.1",
@@ -11551,16 +11748,105 @@ func TestWebClientViewPDF(t *testing.T) {
 	rr := executeRequest(req)
 	checkResponseCode(t, http.StatusBadRequest, rr)
 
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath, nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+
 	req, err = http.NewRequest(http.MethodGet, webClientViewPDFPath+"?path=test.pdf", nil)
 	assert.NoError(t, err)
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=test.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Unable to get file")
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2F", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Invalid file")
+
+	err = os.WriteFile(filepath.Join(user.GetHomeDir(), "test.pdf"), []byte("some text data"), 0666)
+	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "Invalid PDF file")
+
+	err = createTestFile(filepath.Join(user.GetHomeDir(), "test.pdf"), 1024)
+	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusBadRequest, rr)
+	assert.Contains(t, rr.Body.String(), "does not look like a PDF")
+
+	fakePDF := []byte(`%PDF-1.6`)
+	for i := 0; i < 128; i++ {
+		fakePDF = append(fakePDF, []byte(fmt.Sprintf("%d", i))...)
+	}
+	err = os.WriteFile(filepath.Join(user.GetHomeDir(), "test.pdf"), fakePDF, 0666)
+	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusOK, rr)
+
+	user.Filters.FilePatterns = []sdk.PatternsFilter{
+		{
+			Path:           "/",
+			DeniedPatterns: []string{"*.pdf"},
+		},
+	}
+	_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
+	assert.Contains(t, rr.Body.String(), "Unable to get a reader for the file")
+
+	user.Filters.FilePatterns = []sdk.PatternsFilter{
+		{
+			Path:           "/",
+			DeniedPatterns: []string{"*.txt"},
+		},
+	}
+	user.Filters.DeniedProtocols = []string{common.ProtocolHTTP}
+	_, _, err = httpdtest.UpdateUser(user, http.StatusOK, "")
+	assert.NoError(t, err)
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusForbidden, rr)
+
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
+
+	req, err = http.NewRequest(http.MethodGet, webClientGetPDFPath+"?path=%2Ftest.pdf", nil)
+	assert.NoError(t, err)
+	setJWTCookieForReq(req, webToken)
+	rr = executeRequest(req)
+	checkResponseCode(t, http.StatusNotFound, rr)
 }
 
 func TestWebEditFile(t *testing.T) {
@@ -11796,6 +12082,8 @@ func TestWebGetFiles(t *testing.T) {
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusPartialContent, rr)
 	assert.Equal(t, testFileContents[2:], rr.Body.Bytes())
+	lastModified, err := http.ParseTime(rr.Header().Get("Last-Modified"))
+	assert.NoError(t, err)
 
 	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+testFileName, nil)
 	req.Header.Set("Range", "bytes=-2")
@@ -11824,44 +12112,44 @@ func TestWebGetFiles(t *testing.T) {
 
 	req, _ = http.NewRequest(http.MethodHead, webClientFilesPath+"?path="+testFileName, nil)
 	req.Header.Set("Range", "bytes=2-")
-	req.Header.Set("If-Range", time.Now().UTC().Add(120*time.Second).Format(http.TimeFormat))
+	req.Header.Set("If-Range", lastModified.UTC().Format(http.TimeFormat))
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusPartialContent, rr)
 
 	req, _ = http.NewRequest(http.MethodHead, webClientFilesPath+"?path="+testFileName, nil)
 	req.Header.Set("Range", "bytes=2-")
-	req.Header.Set("If-Range", time.Now().UTC().Add(-120*time.Second).Format(http.TimeFormat))
+	req.Header.Set("If-Range", lastModified.UTC().Add(-120*time.Second).Format(http.TimeFormat))
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
 	req, _ = http.NewRequest(http.MethodHead, webClientFilesPath+"?path="+testFileName, nil)
-	req.Header.Set("If-Modified-Since", time.Now().UTC().Add(-120*time.Second).Format(http.TimeFormat))
+	req.Header.Set("If-Modified-Since", lastModified.UTC().Add(-120*time.Second).Format(http.TimeFormat))
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
 
 	req, _ = http.NewRequest(http.MethodHead, webClientFilesPath+"?path="+testFileName, nil)
-	req.Header.Set("If-Modified-Since", time.Now().UTC().Add(120*time.Second).Format(http.TimeFormat))
+	req.Header.Set("If-Modified-Since", lastModified.UTC().Add(120*time.Second).Format(http.TimeFormat))
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusNotModified, rr)
 
 	req, _ = http.NewRequest(http.MethodHead, webClientFilesPath+"?path="+testFileName, nil)
-	req.Header.Set("If-Unmodified-Since", time.Now().UTC().Add(-120*time.Second).Format(http.TimeFormat))
+	req.Header.Set("If-Unmodified-Since", lastModified.UTC().Add(-120*time.Second).Format(http.TimeFormat))
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusPreconditionFailed, rr)
 
 	req, _ = http.NewRequest(http.MethodHead, userFilesPath+"?path="+testFileName, nil)
-	req.Header.Set("If-Unmodified-Since", time.Now().UTC().Add(-120*time.Second).Format(http.TimeFormat))
+	req.Header.Set("If-Unmodified-Since", lastModified.UTC().Add(-120*time.Second).Format(http.TimeFormat))
 	setBearerForReq(req, webAPIToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusPreconditionFailed, rr)
 
 	req, _ = http.NewRequest(http.MethodHead, webClientFilesPath+"?path="+testFileName, nil)
-	req.Header.Set("If-Unmodified-Since", time.Now().UTC().Add(120*time.Second).Format(http.TimeFormat))
+	req.Header.Set("If-Unmodified-Since", lastModified.UTC().Add(120*time.Second).Format(http.TimeFormat))
 	setJWTCookieForReq(req, webToken)
 	rr = executeRequest(req)
 	checkResponseCode(t, http.StatusOK, rr)
@@ -13253,6 +13541,7 @@ func TestGetFilesSFTPBackend(t *testing.T) {
 	user, _, err := httpdtest.AddUser(getTestUser(), http.StatusCreated)
 	assert.NoError(t, err)
 	u := getTestSFTPUser()
+	u.HomeDir = filepath.Clean(os.TempDir())
 	u.FsConfig.SFTPConfig.BufferSize = 2
 	u.Permissions["/adir"] = nil
 	u.Permissions["/adir1"] = []string{dataprovider.PermListItems}
@@ -13262,7 +13551,11 @@ func TestGetFilesSFTPBackend(t *testing.T) {
 			DeniedPatterns: []string{"*.txt"},
 		},
 	}
-	sftpUser, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	sftpUserBuffered, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+	u.Username += "_unbuffered"
+	u.FsConfig.SFTPConfig.BufferSize = 0
+	sftpUserUnbuffered, _, err := httpdtest.AddUser(u, http.StatusCreated)
 	assert.NoError(t, err)
 
 	testFileName := "testsftpfile"
@@ -13280,58 +13573,58 @@ func TestGetFilesSFTPBackend(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.WriteFile(filepath.Join(user.GetHomeDir(), "adir2", "afile.txt"), testFileContents, os.ModePerm)
 	assert.NoError(t, err)
-	webToken, err := getJWTWebClientTokenFromTestServer(sftpUser.Username, defaultPassword)
-	assert.NoError(t, err)
-	req, _ := http.NewRequest(http.MethodGet, webClientFilesPath, nil)
-	setJWTCookieForReq(req, webToken)
-	rr := executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
+	for _, sftpUser := range []dataprovider.User{sftpUserBuffered, sftpUserUnbuffered} {
+		webToken, err := getJWTWebClientTokenFromTestServer(sftpUser.Username, defaultPassword)
+		assert.NoError(t, err)
+		req, _ := http.NewRequest(http.MethodGet, webClientFilesPath, nil)
+		setJWTCookieForReq(req, webToken)
+		rr := executeRequest(req)
+		checkResponseCode(t, http.StatusOK, rr)
 
-	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+path.Join(testDir, "sub"), nil)
-	setJWTCookieForReq(req, webToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
+		req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+path.Join(testDir, "sub"), nil)
+		setJWTCookieForReq(req, webToken)
+		rr = executeRequest(req)
+		checkResponseCode(t, http.StatusOK, rr)
 
-	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+path.Join(testDir, "missing"), nil)
-	setJWTCookieForReq(req, webToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
-	assert.Contains(t, rr.Body.String(), "card-body text-form-error")
-	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path=adir/sub", nil)
-	setJWTCookieForReq(req, webToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
-	assert.Contains(t, rr.Body.String(), "card-body text-form-error")
+		req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+path.Join(testDir, "missing"), nil)
+		setJWTCookieForReq(req, webToken)
+		rr = executeRequest(req)
+		checkResponseCode(t, http.StatusOK, rr)
+		assert.Contains(t, rr.Body.String(), "card-body text-form-error")
+		req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path=adir/sub", nil)
+		setJWTCookieForReq(req, webToken)
+		rr = executeRequest(req)
+		checkResponseCode(t, http.StatusOK, rr)
+		assert.Contains(t, rr.Body.String(), "card-body text-form-error")
 
-	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path=adir1/afile", nil)
-	setJWTCookieForReq(req, webToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
-	assert.Contains(t, rr.Body.String(), "card-body text-form-error")
+		req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path=adir1/afile", nil)
+		setJWTCookieForReq(req, webToken)
+		rr = executeRequest(req)
+		checkResponseCode(t, http.StatusOK, rr)
+		assert.Contains(t, rr.Body.String(), "card-body text-form-error")
 
-	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path=adir2/afile.txt", nil)
-	setJWTCookieForReq(req, webToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
-	assert.Contains(t, rr.Body.String(), "card-body text-form-error")
+		req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path=adir2/afile.txt", nil)
+		setJWTCookieForReq(req, webToken)
+		rr = executeRequest(req)
+		checkResponseCode(t, http.StatusOK, rr)
+		assert.Contains(t, rr.Body.String(), "card-body text-form-error")
 
-	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+testFileName, nil)
-	setJWTCookieForReq(req, webToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusOK, rr)
-	assert.Equal(t, testFileContents, rr.Body.Bytes())
+		req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+testFileName, nil)
+		setJWTCookieForReq(req, webToken)
+		rr = executeRequest(req)
+		checkResponseCode(t, http.StatusOK, rr)
+		assert.Equal(t, testFileContents, rr.Body.Bytes())
 
-	req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+testFileName, nil)
-	req.Header.Set("Range", "bytes=2-")
-	setJWTCookieForReq(req, webToken)
-	rr = executeRequest(req)
-	checkResponseCode(t, http.StatusPartialContent, rr)
-	assert.Equal(t, testFileContents[2:], rr.Body.Bytes())
+		req, _ = http.NewRequest(http.MethodGet, webClientFilesPath+"?path="+testFileName, nil)
+		req.Header.Set("Range", "bytes=2-")
+		setJWTCookieForReq(req, webToken)
+		rr = executeRequest(req)
+		checkResponseCode(t, http.StatusPartialContent, rr)
+		assert.Equal(t, testFileContents[2:], rr.Body.Bytes())
 
-	_, err = httpdtest.RemoveUser(sftpUser, http.StatusOK)
-	assert.NoError(t, err)
-	err = os.RemoveAll(sftpUser.GetHomeDir())
-	assert.NoError(t, err)
+		_, err = httpdtest.RemoveUser(sftpUser, http.StatusOK)
+		assert.NoError(t, err)
+	}
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
@@ -18939,8 +19232,15 @@ func setJWTCookieForReq(req *http.Request, jwtToken string) {
 }
 
 func getJWTAPITokenFromTestServer(username, password string) (string, error) {
+	return getJWTAPITokenFromTestServerWithPasscode(username, password, "")
+}
+
+func getJWTAPITokenFromTestServerWithPasscode(username, password, passcode string) (string, error) {
 	req, _ := http.NewRequest(http.MethodGet, tokenPath, nil)
 	req.SetBasicAuth(username, password)
+	if passcode != "" {
+		req.Header.Set("X-SFTPGO-OTP", passcode)
+	}
 	rr := executeRequest(req)
 	if rr.Code != http.StatusOK {
 		return "", fmt.Errorf("unexpected  status code %v", rr.Code)

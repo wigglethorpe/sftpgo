@@ -220,7 +220,7 @@ The configuration file contains the following sections:
   - `users_base_dir`, string. Users default base directory. If no home dir is defined while adding a new user, and this value is a valid absolute path, then the user home dir will be automatically defined as the path obtained joining the base dir and the username
   - `actions`, struct. It contains the command to execute and/or the HTTP URL to notify and the trigger conditions. See [Custom Actions](./custom-actions.md) for more details
     - `execute_on`, list of strings. Valid values are `add`, `update`, `delete`. `update` action will not be fired for internal updates such as the last login or the user quota fields.
-    - `execute_for`, list of strings. Defines the provider objects that trigger the action. Valid values are `user`, `admin`, `api_key`.
+    - `execute_for`, list of strings. Defines the provider objects that trigger the action. Valid values are `user`, `folder`, `group`, `admin`, `api_key`, `share`.
     - `hook`, string. Absolute path to the command to execute or HTTP URL to notify.
   - `external_auth_hook`, string. Absolute path to an external program or an HTTP URL to invoke for users authentication. See [External Authentication](./external-auth.md) for more details. Leave empty to disable.
   - `external_auth_scope`, integer. 0 means all supported authentication scopes (passwords, public keys and keyboard interactive). 1 means passwords only. 2 means public keys only. 4 means key keyboard interactive only. 8 means TLS certificate. The flags can be combined, for example 6 means public keys and keyboard interactive
@@ -260,6 +260,8 @@ The configuration file contains the following sections:
     - `enable_web_admin`, boolean. Set to `false` to disable the built-in web admin for this binding. You also need to define `templates_path` and `static_files_path` to use the built-in web admin interface. Default `true`.
     - `enable_web_client`, boolean. Set to `false` to disable the built-in web client for this binding. You also need to define `templates_path` and `static_files_path` to use the built-in web client interface. Default `true`.
     - `enable_https`, boolean. Set to `true` and provide both a certificate and a key file to enable HTTPS connection for this binding. Default `false`.
+    - `enabled_login_methods`, integer. Defines the login methods available for the WebAdmin and WebClient UIs. `0` means any configured method: username/password login form and OIDC, if enabled. `1` means OIDC for the WebAdmin UI. `2` means OIDC for the WebClient UI. `4` means login form for the WebAdmin UI. `8` means login form for the WebClient UI. You can combine the values. For example `3` means that you can only login using OIDC on both WebClient and WebAdmin UI. Default: `0`.
+    - `enable_https`, boolean. Set to `true` and provide both a certificate and a key file to enable HTTPS connection for this binding. Default `false`.
     - `certificate_file`, string. Binding specific TLS certificate. This can be an absolute path or a path relative to the config dir.
     - `certificate_key_file`, string. Binding specific private key matching the above certificate. This can be an absolute path or a path relative to the config dir. If not set the global ones will be used, if any.
     - `min_tls_version`, integer. Defines the minimum version of TLS to be enabled. `12` means TLS 1.2 (and therefore TLS 1.2 and TLS 1.3 will be enabled),`13` means TLS 1.3. Default: `12`.
@@ -279,9 +281,11 @@ The configuration file contains the following sections:
       - `client_secret`, string. Defines the application's secret. Default: blank.
       - `redirect_base_url`, string. Defines the base URL to redirect to after OpenID authentication. The suffix `/web/oidc/redirect` will be added to this base URL, adding also the `web_root` if configured. Default: blank.
       - `username_field`, string. Defines the ID token claims field to map to the SFTPGo username. Default: blank.
-      - `role_field`, string. Defines the optional ID token claims field to map to a SFTPGo role. If the defined ID token claims field is set to `admin` the authenticated user is mapped to an SFTPGo admin. You don't need to specify this field if you want to use OpenID only for the Web Client UI. Default: blank.
+      - `scopes`, list of strings. Request the OAuth provider to provide the scope information from an authenticated users. The `openid` scope is mandatory. Default: `"openid", "profile", "email"`.
+      - `role_field`, string. Defines the optional ID token claims field to map to a SFTPGo role. If the defined ID token claims field is set to `admin` the authenticated user is mapped to an SFTPGo admin. You don't need to specify this field if you want to use OpenID only for the Web Client UI. If the field is inside a nested structure, you can use the dot notation to traverse the structures. Default: blank.
       - `implicit_roles`, boolean. If set, the `role_field` is ignored and the SFTPGo role is assumed based on the login link used. Default: `false`.
       - `custom_fields`, list of strings. Custom token claims fields to pass to the pre-login hook. Default: empty.
+      - `debug`, boolean. If set, the received id tokens will be logged at debug level. Default: `false`.
     - `security`, struct. Defines security headers to add to HTTP responses and allows to restrict allowed hosts. The following parameters are supported:
       - `enabled`, boolean. Set to `true` to enable security configurations. Default: `false`.
       - `allowed_hosts`, list of strings. Fully qualified domain names that are allowed. An empty list allows any and all host names. Default: empty.
@@ -330,6 +334,7 @@ The configuration file contains the following sections:
   - `setup` struct containing configurations for the initial setup screen
     - `installation_code`, string. If set, this installation code will be required when creating the first admin account. Please note that even if set using an environment variable this field is read at SFTPGo startup and not at runtime. This is not a license key or similar, the purpose here is to prevent anyone who can access to the initial setup screen from creating an admin user. Default: blank.
     - `installation_code_hint`, string. Description for the installation code input field. Default: `Installation code`.
+  - `hide_support_link`, boolean. If set, the link to the [sponsors section](../README.md#sponsors) will not appear on the setup screen page. Default: `false`.
 - **"telemetry"**, the configuration for the telemetry server, more details [below](#telemetry-server)
   - `bind_port`, integer. The port used for serving HTTP requests. Set to 0 to disable HTTP server. Default: 0
   - `bind_address`, string. Leave blank to listen on all available network interfaces. On \*NIX you can specify an absolute path to listen on a Unix-domain socket. Default: `127.0.0.1`

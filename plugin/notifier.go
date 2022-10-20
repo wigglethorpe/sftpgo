@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package plugin
 
 import (
@@ -186,6 +200,9 @@ func (p *notifierPlugin) notifyFsAction(event *notifier.FsEvent) {
 	}
 
 	go func() {
+		Handler.addTask()
+		defer Handler.removeTask()
+
 		p.sendFsEvent(event)
 	}()
 }
@@ -197,6 +214,9 @@ func (p *notifierPlugin) notifyProviderAction(event *notifier.ProviderEvent, obj
 	}
 
 	go func() {
+		Handler.addTask()
+		defer Handler.removeTask()
+
 		objectAsJSON, err := object.RenderAsJSON(event.Action != "delete")
 		if err != nil {
 			logger.Warn(logSender, "", "unable to render user as json for action %v: %v", event.Action, err)

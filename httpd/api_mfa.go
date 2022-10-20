@@ -1,6 +1,21 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -11,6 +26,10 @@ import (
 	"github.com/drakkan/sftpgo/v2/kms"
 	"github.com/drakkan/sftpgo/v2/mfa"
 	"github.com/drakkan/sftpgo/v2/util"
+)
+
+var (
+	errRecoveryCodeForbidden = errors.New("recovery codes are not available with two-factor authentication disabled")
 )
 
 type generateTOTPRequest struct {
@@ -138,11 +157,19 @@ func getRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 			sendAPIResponse(w, r, err, "", getRespStatus(err))
 			return
 		}
+		if !user.Filters.TOTPConfig.Enabled {
+			sendAPIResponse(w, r, errRecoveryCodeForbidden, "", http.StatusForbidden)
+			return
+		}
 		accountRecoveryCodes = user.Filters.RecoveryCodes
 	} else {
 		admin, err := dataprovider.AdminExists(claims.Username)
 		if err != nil {
 			sendAPIResponse(w, r, err, "", getRespStatus(err))
+			return
+		}
+		if !admin.Filters.TOTPConfig.Enabled {
+			sendAPIResponse(w, r, errRecoveryCodeForbidden, "", http.StatusForbidden)
 			return
 		}
 		accountRecoveryCodes = admin.Filters.RecoveryCodes
@@ -181,6 +208,10 @@ func generateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 			sendAPIResponse(w, r, err, "", getRespStatus(err))
 			return
 		}
+		if !user.Filters.TOTPConfig.Enabled {
+			sendAPIResponse(w, r, errRecoveryCodeForbidden, "", http.StatusForbidden)
+			return
+		}
 		user.Filters.RecoveryCodes = accountRecoveryCodes
 		if err := dataprovider.UpdateUser(&user, dataprovider.ActionExecutorSelf, util.GetIPFromRemoteAddress(r.RemoteAddr)); err != nil {
 			sendAPIResponse(w, r, err, "", getRespStatus(err))
@@ -190,6 +221,10 @@ func generateRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 		admin, err := dataprovider.AdminExists(claims.Username)
 		if err != nil {
 			sendAPIResponse(w, r, err, "", getRespStatus(err))
+			return
+		}
+		if !admin.Filters.TOTPConfig.Enabled {
+			sendAPIResponse(w, r, errRecoveryCodeForbidden, "", http.StatusForbidden)
 			return
 		}
 		admin.Filters.RecoveryCodes = accountRecoveryCodes
@@ -229,8 +264,12 @@ func saveUserTOTPConfig(username string, r *http.Request, recoveryCodes []datapr
 	if user.Filters.TOTPConfig.Secret == nil || !user.Filters.TOTPConfig.Secret.IsPlain() {
 		user.Filters.TOTPConfig.Secret = currentTOTPSecret
 	}
-	if user.CountUnusedRecoveryCodes() < 5 && user.Filters.TOTPConfig.Enabled {
-		user.Filters.RecoveryCodes = recoveryCodes
+	if user.Filters.TOTPConfig.Enabled {
+		if user.CountUnusedRecoveryCodes() < 5 && user.Filters.TOTPConfig.Enabled {
+			user.Filters.RecoveryCodes = recoveryCodes
+		}
+	} else {
+		user.Filters.RecoveryCodes = nil
 	}
 	return dataprovider.UpdateUser(&user, dataprovider.ActionExecutorSelf, util.GetIPFromRemoteAddress(r.RemoteAddr))
 }
@@ -246,8 +285,12 @@ func saveAdminTOTPConfig(username string, r *http.Request, recoveryCodes []datap
 	if err != nil {
 		return util.NewValidationError(fmt.Sprintf("unable to decode JSON body: %v", err))
 	}
-	if admin.CountUnusedRecoveryCodes() < 5 && admin.Filters.TOTPConfig.Enabled {
-		admin.Filters.RecoveryCodes = recoveryCodes
+	if admin.Filters.TOTPConfig.Enabled {
+		if admin.CountUnusedRecoveryCodes() < 5 && admin.Filters.TOTPConfig.Enabled {
+			admin.Filters.RecoveryCodes = recoveryCodes
+		}
+	} else {
+		admin.Filters.RecoveryCodes = nil
 	}
 	if admin.Filters.TOTPConfig.Secret == nil || !admin.Filters.TOTPConfig.Secret.IsPlain() {
 		admin.Filters.TOTPConfig.Secret = currentTOTPSecret

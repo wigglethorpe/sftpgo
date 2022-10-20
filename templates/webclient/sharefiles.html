@@ -1,3 +1,18 @@
+<!--
+Copyright (C) 2019-2022  Nicola Murino
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as published
+by the Free Software Foundation, version 3.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program.  If not, see <https://www.gnu.org/licenses/>.
+-->
 {{template "base" .}}
 
 {{define "title"}}{{.Title}}{{end}}
@@ -79,26 +94,17 @@
 <script src="{{.StaticURL}}/vendor/datatables/dataTables.responsive.min.js"></script>
 <script src="{{.StaticURL}}/vendor/datatables/responsive.bootstrap4.min.js"></script>
 <script type="text/javascript">
-
-    var escapeHTML = function ( t ) {
-		return t
-			.replace( /&/g, '&amp;' )
-			.replace( /</g, '&lt;' )
-			.replace( />/g, '&gt;' )
-			.replace( /"/g, '&quot;' );
-	};
-
     function shortenData(d, cutoff) {
         if ( typeof d !== 'string' ) {
 			return d;
 		}
 
 		if ( d.length <= cutoff ) {
-			return d;
+			return escapeHTML(d);
 		}
 
         var shortened = d.substr(0, cutoff-1);
-        return shortened+'&#8230;';
+        return escapeHTML(shortened)+'&#8230;';
     }
 
     function getIconForFile(filename) {
@@ -132,6 +138,7 @@
             case "mpeg":
             case "mpv":
             case "3gp":
+            case "mp4":
                 return "far fa-file-video";
             case "jpeg":
             case "jpg":
@@ -234,7 +241,7 @@
                     let response;
                     try {
                         var f = files[index];
-                        var uploadPath = '{{.UploadBaseURL}}'+fixedEncodeURIComponent("/"+f.name);
+                        var uploadPath = '{{.UploadBaseURL}}'+fixedEncodeURIComponent("/"+escapeHTML(f.name));
                         var lastModified;
                         try {
                             lastModified = f.lastModified;
@@ -368,6 +375,7 @@
                             var title = "";
                             var cssClass = "";
                             var shortened = shortenData(data, 70);
+                            data = escapeHTML(data);
                             if (shortened != data){
                                 title = escapeHTML(data);
                                 cssClass = "ellipsis";

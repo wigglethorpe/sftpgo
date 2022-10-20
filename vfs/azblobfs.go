@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 //go:build !noazblob
 // +build !noazblob
 
@@ -17,12 +31,14 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/storage/azblob"
 	"github.com/eikenb/pipeat"
+	"github.com/google/uuid"
 	"github.com/pkg/sftp"
 
 	"github.com/drakkan/sftpgo/v2/logger"
@@ -92,23 +108,24 @@ func NewAzBlobFs(connectionID, localTempDir, mountPath string, config AzBlobFsCo
 		if err != nil {
 			return fs, fmt.Errorf("invalid SAS URL: %w", err)
 		}
+		svc, err := azblob.NewServiceClientWithNoCredential(fs.config.SASURL.GetPayload(), clientOptions)
+		if err != nil {
+			return fs, fmt.Errorf("invalid credentials: %v", err)
+		}
 		if parts.ContainerName != "" {
 			if fs.config.Container != "" && fs.config.Container != parts.ContainerName {
 				return fs, fmt.Errorf("container name in SAS URL %#v and container provided %#v do not match",
 					parts.ContainerName, fs.config.Container)
 			}
 			fs.config.Container = parts.ContainerName
+			fs.containerClient, err = svc.NewContainerClient("")
 		} else {
 			if fs.config.Container == "" {
 				return fs, errors.New("container is required with this SAS URL")
 			}
-		}
-		svc, err := azblob.NewServiceClientWithNoCredential(fs.config.SASURL.GetPayload(), clientOptions)
-		if err != nil {
-			return fs, fmt.Errorf("invalid credentials: %v", err)
+			fs.containerClient, err = svc.NewContainerClient(fs.config.Container)
 		}
 		fs.hasContainerAccess = false
-		fs.containerClient, err = svc.NewContainerClient(fs.config.Container)
 		return fs, err
 	}
 
@@ -904,6 +921,7 @@ func (fs *AzureBlobFs) handleMultipartDownload(ctx context.Context, blockBlob *a
 	finished := false
 	var wg sync.WaitGroup
 	var errOnce sync.Once
+	var hasError int32
 	var poolError error
 
 	poolCtx, poolCancel := context.WithCancel(ctx)
@@ -920,7 +938,7 @@ func (fs *AzureBlobFs) handleMultipartDownload(ctx context.Context, blockBlob *a
 		offset = end
 
 		guard <- struct{}{}
-		if poolError != nil {
+		if atomic.LoadInt32(&hasError) == 1 {
 			fsLog(fs, logger.LevelDebug, "pool error, download for part %v not started", part)
 			break
 		}
@@ -941,8 +959,9 @@ func (fs *AzureBlobFs) handleMultipartDownload(ctx context.Context, blockBlob *a
 			err := fs.downloadPart(innerCtx, blockBlob, buf, writer, start, count, writeOffset)
 			if err != nil {
 				errOnce.Do(func() {
-					poolError = err
-					fsLog(fs, logger.LevelError, "multipart download error: %+v", poolError)
+					fsLog(fs, logger.LevelError, "multipart download error: %+v", err)
+					atomic.StoreInt32(&hasError, 1)
+					poolError = fmt.Errorf("multipart download error: %w", err)
 					poolCancel()
 				})
 			}
@@ -967,10 +986,10 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 	// we only need to recycle few byte slices
 	pool := newBufferAllocator(int(partSize))
 	finished := false
-	binaryBlockID := make([]byte, 8)
 	var blocks []string
 	var wg sync.WaitGroup
 	var errOnce sync.Once
+	var hasError int32
 	var poolError error
 
 	poolCtx, poolCancel := context.WithCancel(ctx)
@@ -993,12 +1012,19 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 			return err
 		}
 
-		fs.incrementBlockID(binaryBlockID)
-		blockID := base64.StdEncoding.EncodeToString(binaryBlockID)
+		// Block IDs are unique values to avoid issue if 2+ clients are uploading blocks
+		// at the same time causing CommitBlockList to get a mix of blocks from all the clients.
+		generatedUUID, err := uuid.NewRandom()
+		if err != nil {
+			pool.releaseBuffer(buf)
+			pool.free()
+			return fmt.Errorf("unable to generate block ID: %w", err)
+		}
+		blockID := base64.StdEncoding.EncodeToString([]byte(generatedUUID.String()))
 		blocks = append(blocks, blockID)
 
 		guard <- struct{}{}
-		if poolError != nil {
+		if atomic.LoadInt32(&hasError) == 1 {
 			fsLog(fs, logger.LevelError, "pool error, upload for part %v not started", part)
 			pool.releaseBuffer(buf)
 			break
@@ -1021,8 +1047,9 @@ func (fs *AzureBlobFs) handleMultipartUpload(ctx context.Context, reader io.Read
 			_, err := blockBlob.StageBlock(innerCtx, blockID, bufferReader, &azblob.BlockBlobStageBlockOptions{})
 			if err != nil {
 				errOnce.Do(func() {
-					poolError = err
-					fsLog(fs, logger.LevelDebug, "multipart upload error: %+v", poolError)
+					fsLog(fs, logger.LevelDebug, "multipart upload error: %+v", err)
+					atomic.StoreInt32(&hasError, 1)
+					poolError = fmt.Errorf("multipart upload error: %w", err)
 					poolCancel()
 				})
 			}
@@ -1068,18 +1095,6 @@ func (*AzureBlobFs) readFill(r io.Reader, buf []byte) (n int, err error) {
 		n += nn
 	}
 	return n, err
-}
-
-// copied from rclone
-func (*AzureBlobFs) incrementBlockID(blockID []byte) {
-	for i, digit := range blockID {
-		newDigit := digit + 1
-		blockID[i] = newDigit
-		if newDigit >= digit {
-			// exit if no carry
-			break
-		}
-	}
 }
 
 func (fs *AzureBlobFs) preserveModificationTime(source, target string, fi os.FileInfo) {

@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 // Package config manages the configuration
 package config
 
@@ -85,6 +99,7 @@ var (
 		Port:                  8080,
 		EnableWebAdmin:        true,
 		EnableWebClient:       true,
+		EnabledLoginMethods:   0,
 		EnableHTTPS:           false,
 		CertificateFile:       "",
 		CertificateKeyFile:    "",
@@ -105,7 +120,9 @@ var (
 			UsernameField:   "",
 			RoleField:       "",
 			ImplicitRoles:   false,
+			Scopes:          []string{"openid", "profile", "email"},
 			CustomFields:    []string{},
+			Debug:           false,
 		},
 		Security: httpd.SecurityConf{
 			Enabled:                 false,
@@ -374,6 +391,7 @@ func Init() {
 				InstallationCode:     "",
 				InstallationCodeHint: defaultInstallCodeHint,
 			},
+			HideSupportLink: false,
 		},
 		HTTPConfig: httpclient.Config{
 			Timeout:        20,
@@ -957,9 +975,7 @@ func getPluginsFromEnv(idx int) {
 }
 
 func getSFTPDBindindFromEnv(idx int) {
-	binding := sftpd.Binding{
-		ApplyProxyConfig: true,
-	}
+	binding := defaultSFTPDBinding
 	if len(globalConf.SFTPD.Bindings) > idx {
 		binding = globalConf.SFTPD.Bindings[idx]
 	}
@@ -995,9 +1011,17 @@ func getSFTPDBindindFromEnv(idx int) {
 
 func getFTPDPassiveIPOverridesFromEnv(idx int) []ftpd.PassiveIPOverride {
 	var overrides []ftpd.PassiveIPOverride
+	if len(globalConf.FTPD.Bindings) > idx {
+		overrides = globalConf.FTPD.Bindings[idx].PassiveIPOverrides
+	}
 
 	for subIdx := 0; subIdx < 10; subIdx++ {
 		var override ftpd.PassiveIPOverride
+		var replace bool
+		if len(globalConf.FTPD.Bindings) > idx && len(globalConf.FTPD.Bindings[idx].PassiveIPOverrides) > subIdx {
+			override = globalConf.FTPD.Bindings[idx].PassiveIPOverrides[subIdx]
+			replace = true
+		}
 
 		ip, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_FTPD__BINDINGS__%v__PASSIVE_IP_OVERRIDES__%v__IP", idx, subIdx))
 		if ok {
@@ -1011,7 +1035,11 @@ func getFTPDPassiveIPOverridesFromEnv(idx int) []ftpd.PassiveIPOverride {
 		}
 
 		if len(override.Networks) > 0 {
-			overrides = append(overrides, override)
+			if replace {
+				overrides[subIdx] = override
+			} else {
+				overrides = append(overrides, override)
+			}
 		}
 	}
 
@@ -1019,10 +1047,7 @@ func getFTPDPassiveIPOverridesFromEnv(idx int) []ftpd.PassiveIPOverride {
 }
 
 func getDefaultFTPDBinding(idx int) ftpd.Binding {
-	binding := ftpd.Binding{
-		ApplyProxyConfig: true,
-		MinTLSVersion:    12,
-	}
+	binding := defaultFTPDBinding
 	if len(globalConf.FTPD.Bindings) > idx {
 		binding = globalConf.FTPD.Bindings[idx]
 	}
@@ -1155,9 +1180,7 @@ func getWebDAVDBindingProxyConfigsFromEnv(idx int, binding *webdavd.Binding) boo
 }
 
 func getWebDAVDBindingFromEnv(idx int) {
-	binding := webdavd.Binding{
-		MinTLSVersion: 12,
-	}
+	binding := defaultWebDAVDBinding
 	if len(globalConf.WebDAVD.Bindings) > idx {
 		binding = globalConf.WebDAVD.Bindings[idx]
 	}
@@ -1233,22 +1256,44 @@ func getWebDAVDBindingFromEnv(idx int) {
 
 func getHTTPDSecurityProxyHeadersFromEnv(idx int) []httpd.HTTPSProxyHeader {
 	var httpsProxyHeaders []httpd.HTTPSProxyHeader
+	if len(globalConf.HTTPDConfig.Bindings) > idx {
+		httpsProxyHeaders = globalConf.HTTPDConfig.Bindings[idx].Security.HTTPSProxyHeaders
+	}
 
 	for subIdx := 0; subIdx < 10; subIdx++ {
-		proxyKey, _ := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__SECURITY__HTTPS_PROXY_HEADERS__%v__KEY", idx, subIdx))
-		proxyVal, _ := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__SECURITY__HTTPS_PROXY_HEADERS__%v__VALUE", idx, subIdx))
-		if proxyKey != "" && proxyVal != "" {
-			httpsProxyHeaders = append(httpsProxyHeaders, httpd.HTTPSProxyHeader{
-				Key:   proxyKey,
-				Value: proxyVal,
-			})
+		var httpsProxyHeader httpd.HTTPSProxyHeader
+		var replace bool
+		if len(globalConf.HTTPDConfig.Bindings) > idx &&
+			len(globalConf.HTTPDConfig.Bindings[idx].Security.HTTPSProxyHeaders) > subIdx {
+			httpsProxyHeader = httpsProxyHeaders[subIdx]
+			replace = true
+		}
+		proxyKey, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__SECURITY__HTTPS_PROXY_HEADERS__%v__KEY",
+			idx, subIdx))
+		if ok {
+			httpsProxyHeader.Key = proxyKey
+		}
+		proxyVal, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__SECURITY__HTTPS_PROXY_HEADERS__%v__VALUE",
+			idx, subIdx))
+		if ok {
+			httpsProxyHeader.Value = proxyVal
+		}
+		if httpsProxyHeader.Key != "" && httpsProxyHeader.Value != "" {
+			if replace {
+				httpsProxyHeaders[subIdx] = httpsProxyHeader
+			} else {
+				httpsProxyHeaders = append(httpsProxyHeaders, httpsProxyHeader)
+			}
 		}
 	}
 	return httpsProxyHeaders
 }
 
 func getHTTPDSecurityConfFromEnv(idx int) (httpd.SecurityConf, bool) { //nolint:gocyclo
-	var result httpd.SecurityConf
+	result := defaultHTTPDBinding.Security
+	if len(globalConf.HTTPDConfig.Bindings) > idx {
+		result = globalConf.HTTPDConfig.Bindings[idx].Security
+	}
 	isSet := false
 
 	enabled, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__SECURITY__ENABLED", idx))
@@ -1296,6 +1341,7 @@ func getHTTPDSecurityConfFromEnv(idx int) (httpd.SecurityConf, bool) { //nolint:
 	stsSeconds, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__SECURITY__STS_SECONDS", idx))
 	if ok {
 		result.STSSeconds = stsSeconds
+		isSet = true
 	}
 
 	stsIncludeSubDomains, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__SECURITY__STS_INCLUDE_SUBDOMAINS", idx))
@@ -1344,7 +1390,10 @@ func getHTTPDSecurityConfFromEnv(idx int) (httpd.SecurityConf, bool) { //nolint:
 }
 
 func getHTTPDOIDCFromEnv(idx int) (httpd.OIDC, bool) {
-	var result httpd.OIDC
+	result := defaultHTTPDBinding.OIDC
+	if len(globalConf.HTTPDConfig.Bindings) > idx {
+		result = globalConf.HTTPDConfig.Bindings[idx].OIDC
+	}
 	isSet := false
 
 	clientID, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__OIDC__CLIENT_ID", idx))
@@ -1377,6 +1426,12 @@ func getHTTPDOIDCFromEnv(idx int) (httpd.OIDC, bool) {
 		isSet = true
 	}
 
+	scopes, ok := lookupStringListFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__OIDC__SCOPES", idx))
+	if ok {
+		result.Scopes = scopes
+		isSet = true
+	}
+
 	roleField, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__OIDC__ROLE_FIELD", idx))
 	if ok {
 		result.RoleField = roleField
@@ -1395,81 +1450,90 @@ func getHTTPDOIDCFromEnv(idx int) (httpd.OIDC, bool) {
 		isSet = true
 	}
 
+	debug, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__OIDC__DEBUG", idx))
+	if ok {
+		result.Debug = debug
+		isSet = true
+	}
+
 	return result, isSet
 }
 
-func getHTTPDUIBrandingFromEnv(prefix string) (httpd.UIBranding, bool) {
-	var result httpd.UIBranding
+func getHTTPDUIBrandingFromEnv(prefix string, branding httpd.UIBranding) (httpd.UIBranding, bool) {
 	isSet := false
 
 	name, ok := os.LookupEnv(fmt.Sprintf("%s__NAME", prefix))
 	if ok {
-		result.Name = name
+		branding.Name = name
 		isSet = true
 	}
 
 	shortName, ok := os.LookupEnv(fmt.Sprintf("%s__SHORT_NAME", prefix))
 	if ok {
-		result.ShortName = shortName
+		branding.ShortName = shortName
 		isSet = true
 	}
 
 	faviconPath, ok := os.LookupEnv(fmt.Sprintf("%s__FAVICON_PATH", prefix))
 	if ok {
-		result.FaviconPath = faviconPath
+		branding.FaviconPath = faviconPath
 		isSet = true
 	}
 
 	logoPath, ok := os.LookupEnv(fmt.Sprintf("%s__LOGO_PATH", prefix))
 	if ok {
-		result.LogoPath = logoPath
+		branding.LogoPath = logoPath
 		isSet = true
 	}
 
 	loginImagePath, ok := os.LookupEnv(fmt.Sprintf("%s__LOGIN_IMAGE_PATH", prefix))
 	if ok {
-		result.LoginImagePath = loginImagePath
+		branding.LoginImagePath = loginImagePath
 		isSet = true
 	}
 
 	disclaimerName, ok := os.LookupEnv(fmt.Sprintf("%s__DISCLAIMER_NAME", prefix))
 	if ok {
-		result.DisclaimerName = disclaimerName
+		branding.DisclaimerName = disclaimerName
 		isSet = true
 	}
 
 	disclaimerPath, ok := os.LookupEnv(fmt.Sprintf("%s__DISCLAIMER_PATH", prefix))
 	if ok {
-		result.DisclaimerPath = disclaimerPath
+		branding.DisclaimerPath = disclaimerPath
 		isSet = true
 	}
 
 	defaultCSSPath, ok := os.LookupEnv(fmt.Sprintf("%s__DEFAULT_CSS", prefix))
 	if ok {
-		result.DefaultCSS = defaultCSSPath
+		branding.DefaultCSS = defaultCSSPath
 		isSet = true
 	}
 
 	extraCSS, ok := lookupStringListFromEnv(fmt.Sprintf("%s__EXTRA_CSS", prefix))
 	if ok {
-		result.ExtraCSS = extraCSS
+		branding.ExtraCSS = extraCSS
 		isSet = true
 	}
-
-	return result, isSet
+	return branding, isSet
 }
 
 func getHTTPDBrandingFromEnv(idx int) (httpd.Branding, bool) {
-	var result httpd.Branding
+	result := defaultHTTPDBinding.Branding
+	if len(globalConf.HTTPDConfig.Bindings) > idx {
+		result = globalConf.HTTPDConfig.Bindings[idx].Branding
+	}
 	isSet := false
 
-	webAdmin, ok := getHTTPDUIBrandingFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__BRANDING__WEB_ADMIN", idx))
+	webAdmin, ok := getHTTPDUIBrandingFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__BRANDING__WEB_ADMIN", idx),
+		result.WebAdmin)
 	if ok {
 		result.WebAdmin = webAdmin
 		isSet = true
 	}
 
-	webClient, ok := getHTTPDUIBrandingFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__BRANDING__WEB_CLIENT", idx))
+	webClient, ok := getHTTPDUIBrandingFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__BRANDING__WEB_CLIENT", idx),
+		result.WebClient)
 	if ok {
 		result.WebClient = webClient
 		isSet = true
@@ -1480,9 +1544,18 @@ func getHTTPDBrandingFromEnv(idx int) (httpd.Branding, bool) {
 
 func getHTTPDWebClientIntegrationsFromEnv(idx int) []httpd.WebClientIntegration {
 	var integrations []httpd.WebClientIntegration
+	if len(globalConf.HTTPDConfig.Bindings) > idx {
+		integrations = globalConf.HTTPDConfig.Bindings[idx].WebClientIntegrations
+	}
 
 	for subIdx := 0; subIdx < 10; subIdx++ {
 		var integration httpd.WebClientIntegration
+		var replace bool
+		if len(globalConf.HTTPDConfig.Bindings) > idx &&
+			len(globalConf.HTTPDConfig.Bindings[idx].WebClientIntegrations) > subIdx {
+			integration = integrations[subIdx]
+			replace = true
+		}
 
 		url, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__WEB_CLIENT_INTEGRATIONS__%v__URL", idx, subIdx))
 		if ok {
@@ -1495,8 +1568,12 @@ func getHTTPDWebClientIntegrationsFromEnv(idx int) []httpd.WebClientIntegration 
 			integration.FileExtensions = extensions
 		}
 
-		if url != "" && len(extensions) > 0 {
-			integrations = append(integrations, integration)
+		if integration.URL != "" && len(integration.FileExtensions) > 0 {
+			if replace {
+				integrations[subIdx] = integration
+			} else {
+				integrations = append(integrations, integration)
+			}
 		}
 	}
 
@@ -1504,12 +1581,7 @@ func getHTTPDWebClientIntegrationsFromEnv(idx int) []httpd.WebClientIntegration 
 }
 
 func getDefaultHTTPBinding(idx int) httpd.Binding {
-	binding := httpd.Binding{
-		EnableWebAdmin:  true,
-		EnableWebClient: true,
-		RenderOpenAPI:   true,
-		MinTLSVersion:   12,
-	}
+	binding := defaultHTTPDBinding
 	if len(globalConf.HTTPDConfig.Bindings) > idx {
 		binding = globalConf.HTTPDConfig.Bindings[idx]
 	}
@@ -1540,6 +1612,7 @@ func getHTTPDNestedObjectsFromEnv(idx int, binding *httpd.Binding) bool {
 	brandingConf, ok := getHTTPDBrandingFromEnv(idx)
 	if ok {
 		binding.Branding = brandingConf
+		isSet = true
 	}
 
 	return isSet
@@ -1569,7 +1642,7 @@ func getHTTPDBindingProxyConfigsFromEnv(idx int, binding *httpd.Binding) bool {
 	return isSet
 }
 
-func getHTTPDBindingFromEnv(idx int) {
+func getHTTPDBindingFromEnv(idx int) { //nolint:gocyclo
 	binding := getDefaultHTTPBinding(idx)
 	isSet := false
 
@@ -1606,6 +1679,12 @@ func getHTTPDBindingFromEnv(idx int) {
 	enableWebClient, ok := lookupBoolFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__ENABLE_WEB_CLIENT", idx))
 	if ok {
 		binding.EnableWebClient = enableWebClient
+		isSet = true
+	}
+
+	enabledLoginMethods, ok := lookupIntFromEnv(fmt.Sprintf("SFTPGO_HTTPD__BINDINGS__%v__ENABLED_LOGIN_METHODS", idx))
+	if ok {
+		binding.EnabledLoginMethods = int(enabledLoginMethods)
 		isSet = true
 	}
 
@@ -1668,6 +1747,9 @@ func setHTTPDBinding(isSet bool, binding httpd.Binding, idx int) {
 
 func getHTTPClientCertificatesFromEnv(idx int) {
 	tlsCert := httpclient.TLSKeyPair{}
+	if len(globalConf.HTTPConfig.Certificates) > idx {
+		tlsCert = globalConf.HTTPConfig.Certificates[idx]
+	}
 
 	cert, ok := os.LookupEnv(fmt.Sprintf("SFTPGO_HTTP__CERTIFICATES__%v__CERT", idx))
 	if ok {
@@ -1893,9 +1975,10 @@ func setViperDefaults() {
 	viper.SetDefault("httpd.cors.allowed_headers", globalConf.HTTPDConfig.Cors.AllowedHeaders)
 	viper.SetDefault("httpd.cors.exposed_headers", globalConf.HTTPDConfig.Cors.ExposedHeaders)
 	viper.SetDefault("httpd.cors.allow_credentials", globalConf.HTTPDConfig.Cors.AllowCredentials)
+	viper.SetDefault("httpd.cors.max_age", globalConf.HTTPDConfig.Cors.MaxAge)
 	viper.SetDefault("httpd.setup.installation_code", globalConf.HTTPDConfig.Setup.InstallationCode)
 	viper.SetDefault("httpd.setup.installation_code_hint", globalConf.HTTPDConfig.Setup.InstallationCodeHint)
-	viper.SetDefault("httpd.cors.max_age", globalConf.HTTPDConfig.Cors.MaxAge)
+	viper.SetDefault("httpd.hide_support_link", globalConf.HTTPDConfig.HideSupportLink)
 	viper.SetDefault("http.timeout", globalConf.HTTPConfig.Timeout)
 	viper.SetDefault("http.retry_wait_min", globalConf.HTTPConfig.RetryWaitMin)
 	viper.SetDefault("http.retry_wait_max", globalConf.HTTPConfig.RetryWaitMax)

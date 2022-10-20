@@ -1,3 +1,17 @@
+// Copyright (C) 2019-2022  Nicola Murino
+//
+// This program is free software: you can redistribute it and/or modify
+// it under the terms of the GNU Affero General Public License as published
+// by the Free Software Foundation, version 3.
+//
+// This program is distributed in the hope that it will be useful,
+// but WITHOUT ANY WARRANTY; without even the implied warranty of
+// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+// GNU Affero General Public License for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
 package httpd
 
 import (
@@ -76,7 +90,7 @@ func (s *httpdServer) listenAndServe() error {
 		ReadTimeout:       60 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       60 * time.Second,
-		MaxHeaderBytes:    1 << 16, // 64KB
+		MaxHeaderBytes:    1 << 18, // 256KB
 		ErrorLog:          log.New(&logger.StdLoggerWrapper{Sender: logSender}, "", 0),
 	}
 	if certMgr != nil && s.binding.EnableHTTPS {
@@ -140,21 +154,22 @@ func (s *httpdServer) refreshCookie(next http.Handler) http.Handler {
 
 func (s *httpdServer) renderClientLoginPage(w http.ResponseWriter, error, ip string) {
 	data := loginPage{
-		CurrentURL: webClientLoginPath,
-		Version:    version.Get().Version,
-		Error:      error,
-		CSRFToken:  createCSRFToken(ip),
-		StaticURL:  webStaticFilesPath,
-		Branding:   s.binding.Branding.WebClient,
+		CurrentURL:   webClientLoginPath,
+		Version:      version.Get().Version,
+		Error:        error,
+		CSRFToken:    createCSRFToken(ip),
+		StaticURL:    webStaticFilesPath,
+		Branding:     s.binding.Branding.WebClient,
+		FormDisabled: s.binding.isWebClientLoginFormDisabled(),
 	}
 	if s.binding.showAdminLoginURL() {
 		data.AltLoginURL = webAdminLoginPath
 		data.AltLoginName = s.binding.Branding.WebAdmin.ShortName
 	}
-	if smtp.IsEnabled() {
+	if smtp.IsEnabled() && !data.FormDisabled {
 		data.ForgotPwdURL = webClientForgotPwdPath
 	}
-	if s.binding.OIDC.isEnabled() {
+	if s.binding.OIDC.isEnabled() && !s.binding.isWebClientOIDCLoginDisabled() {
 		data.OpenIDLoginURL = webClientOIDCLoginPath
 	}
 	renderClientTemplate(w, templateClientLogin, data)
@@ -517,21 +532,22 @@ func (s *httpdServer) handleWebAdminLoginPost(w http.ResponseWriter, r *http.Req
 
 func (s *httpdServer) renderAdminLoginPage(w http.ResponseWriter, error, ip string) {
 	data := loginPage{
-		CurrentURL: webAdminLoginPath,
-		Version:    version.Get().Version,
-		Error:      error,
-		CSRFToken:  createCSRFToken(ip),
-		StaticURL:  webStaticFilesPath,
-		Branding:   s.binding.Branding.WebAdmin,
+		CurrentURL:   webAdminLoginPath,
+		Version:      version.Get().Version,
+		Error:        error,
+		CSRFToken:    createCSRFToken(ip),
+		StaticURL:    webStaticFilesPath,
+		Branding:     s.binding.Branding.WebAdmin,
+		FormDisabled: s.binding.isWebAdminLoginFormDisabled(),
 	}
 	if s.binding.showClientLoginURL() {
 		data.AltLoginURL = webClientLoginPath
 		data.AltLoginName = s.binding.Branding.WebClient.ShortName
 	}
-	if smtp.IsEnabled() {
+	if smtp.IsEnabled() && !data.FormDisabled {
 		data.ForgotPwdURL = webAdminForgotPwdPath
 	}
-	if s.binding.OIDC.hasRoles() {
+	if s.binding.OIDC.hasRoles() && !s.binding.isWebAdminOIDCLoginDisabled() {
 		data.OpenIDLoginURL = webAdminOIDCLoginPath
 	}
 	renderAdminTemplate(w, templateLogin, data)
@@ -1384,27 +1400,29 @@ func (s *httpdServer) setupWebClientRoutes() {
 			http.Redirect(w, r, webClientLoginPath, http.StatusFound)
 		})
 		s.router.Get(webClientLoginPath, s.handleClientWebLogin)
-		if s.binding.OIDC.isEnabled() {
+		if s.binding.OIDC.isEnabled() && !s.binding.isWebClientOIDCLoginDisabled() {
 			s.router.Get(webClientOIDCLoginPath, s.handleWebClientOIDCLogin)
 		}
-		s.router.Post(webClientLoginPath, s.handleWebClientLoginPost)
-		s.router.Get(webClientForgotPwdPath, s.handleWebClientForgotPwd)
-		s.router.Post(webClientForgotPwdPath, s.handleWebClientForgotPwdPost)
-		s.router.Get(webClientResetPwdPath, s.handleWebClientPasswordReset)
-		s.router.Post(webClientResetPwdPath, s.handleWebClientPasswordResetPost)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
-			Get(webClientTwoFactorPath, s.handleWebClientTwoFactor)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
-			Post(webClientTwoFactorPath, s.handleWebClientTwoFactorPost)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
-			Get(webClientTwoFactorRecoveryPath, s.handleWebClientTwoFactorRecovery)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
-			Post(webClientTwoFactorRecoveryPath, s.handleWebClientTwoFactorRecoveryPost)
-		// share API exposed to external users
+		if !s.binding.isWebClientLoginFormDisabled() {
+			s.router.Post(webClientLoginPath, s.handleWebClientLoginPost)
+			s.router.Get(webClientForgotPwdPath, s.handleWebClientForgotPwd)
+			s.router.Post(webClientForgotPwdPath, s.handleWebClientForgotPwdPost)
+			s.router.Get(webClientResetPwdPath, s.handleWebClientPasswordReset)
+			s.router.Post(webClientResetPwdPath, s.handleWebClientPasswordResetPost)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
+				Get(webClientTwoFactorPath, s.handleWebClientTwoFactor)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
+				Post(webClientTwoFactorPath, s.handleWebClientTwoFactorPost)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
+				Get(webClientTwoFactorRecoveryPath, s.handleWebClientTwoFactorRecovery)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebClientPartial)).
+				Post(webClientTwoFactorRecoveryPath, s.handleWebClientTwoFactorRecoveryPost)
+		}
+		// share routes exposed to external users
 		s.router.Get(webClientPubSharesPath+"/{id}", s.downloadFromShare)
 		s.router.Get(webClientPubSharesPath+"/{id}/browse", s.handleShareGetFiles)
 		s.router.Get(webClientPubSharesPath+"/{id}/upload", s.handleClientUploadToShare)
@@ -1422,6 +1440,7 @@ func (s *httpdServer) setupWebClientRoutes() {
 			router.Get(webClientLogoutPath, s.handleWebClientLogout)
 			router.With(s.checkSecondFactorRequirement, s.refreshCookie).Get(webClientFilesPath, s.handleClientGetFiles)
 			router.With(s.checkSecondFactorRequirement, s.refreshCookie).Get(webClientViewPDFPath, s.handleClientViewPDF)
+			router.With(s.checkSecondFactorRequirement, s.refreshCookie).Get(webClientGetPDFPath, s.handleClientGetPDF)
 			router.With(s.checkSecondFactorRequirement, s.refreshCookie, verifyCSRFHeader).Get(webClientFilePath, getUserFile)
 			router.With(s.checkSecondFactorRequirement, s.checkHTTPUserPerm(sdk.WebClientWriteDisabled), verifyCSRFHeader).
 				Post(webClientFilePath, uploadUserFile)
@@ -1440,10 +1459,9 @@ func (s *httpdServer) setupWebClientRoutes() {
 				Delete(webClientDirsPath, deleteUserDir)
 			router.With(s.checkSecondFactorRequirement, s.refreshCookie).
 				Get(webClientDownloadZipPath, s.handleWebClientDownloadZip)
-			router.With(s.checkSecondFactorRequirement, s.refreshCookie, s.requireBuiltinLogin).
-				Get(webClientProfilePath, s.handleClientGetProfile)
-			router.With(s.checkSecondFactorRequirement, s.requireBuiltinLogin).
-				Post(webClientProfilePath, s.handleWebClientProfilePost)
+			router.With(s.checkSecondFactorRequirement, s.refreshCookie).Get(webClientProfilePath,
+				s.handleClientGetProfile)
+			router.With(s.checkSecondFactorRequirement).Post(webClientProfilePath, s.handleWebClientProfilePost)
 			router.With(s.checkSecondFactorRequirement, s.checkHTTPUserPerm(sdk.WebClientPasswordChangeDisabled)).
 				Get(webChangeClientPwdPath, s.handleWebClientChangePwd)
 			router.With(s.checkSecondFactorRequirement, s.checkHTTPUserPerm(sdk.WebClientPasswordChangeDisabled)).
@@ -1483,28 +1501,30 @@ func (s *httpdServer) setupWebAdminRoutes() {
 			s.redirectToWebPath(w, r, webAdminLoginPath)
 		})
 		s.router.Get(webAdminLoginPath, s.handleWebAdminLogin)
-		if s.binding.OIDC.hasRoles() {
+		if s.binding.OIDC.hasRoles() && !s.binding.isWebAdminOIDCLoginDisabled() {
 			s.router.Get(webAdminOIDCLoginPath, s.handleWebAdminOIDCLogin)
 		}
-		s.router.Post(webAdminLoginPath, s.handleWebAdminLoginPost)
 		s.router.Get(webAdminSetupPath, s.handleWebAdminSetupGet)
 		s.router.Post(webAdminSetupPath, s.handleWebAdminSetupPost)
-		s.router.Get(webAdminForgotPwdPath, s.handleWebAdminForgotPwd)
-		s.router.Post(webAdminForgotPwdPath, s.handleWebAdminForgotPwdPost)
-		s.router.Get(webAdminResetPwdPath, s.handleWebAdminPasswordReset)
-		s.router.Post(webAdminResetPwdPath, s.handleWebAdminPasswordResetPost)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
-			Get(webAdminTwoFactorPath, s.handleWebAdminTwoFactor)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
-			Post(webAdminTwoFactorPath, s.handleWebAdminTwoFactorPost)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
-			Get(webAdminTwoFactorRecoveryPath, s.handleWebAdminTwoFactorRecovery)
-		s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
-			s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
-			Post(webAdminTwoFactorRecoveryPath, s.handleWebAdminTwoFactorRecoveryPost)
+		if !s.binding.isWebAdminLoginFormDisabled() {
+			s.router.Post(webAdminLoginPath, s.handleWebAdminLoginPost)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
+				Get(webAdminTwoFactorPath, s.handleWebAdminTwoFactor)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
+				Post(webAdminTwoFactorPath, s.handleWebAdminTwoFactorPost)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
+				Get(webAdminTwoFactorRecoveryPath, s.handleWebAdminTwoFactorRecovery)
+			s.router.With(jwtauth.Verify(s.tokenAuth, jwtauth.TokenFromCookie),
+				s.jwtAuthenticatorPartial(tokenAudienceWebAdminPartial)).
+				Post(webAdminTwoFactorRecoveryPath, s.handleWebAdminTwoFactorRecoveryPost)
+			s.router.Get(webAdminForgotPwdPath, s.handleWebAdminForgotPwd)
+			s.router.Post(webAdminForgotPwdPath, s.handleWebAdminForgotPwdPost)
+			s.router.Get(webAdminResetPwdPath, s.handleWebAdminPasswordReset)
+			s.router.Post(webAdminResetPwdPath, s.handleWebAdminPasswordResetPost)
+		}
 
 		s.router.Group(func(router chi.Router) {
 			if s.binding.OIDC.isEnabled() {
