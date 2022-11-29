@@ -15,8 +15,6 @@
 package dataprovider
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,9 +22,11 @@ import (
 	"net"
 	"os"
 	"path"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/rs/xid"
 	"github.com/sftpgo/sdk"
 
 	"github.com/drakkan/sftpgo/v2/internal/kms"
@@ -390,7 +390,7 @@ func (u *User) setAnonymousSettings() {
 // RenderAsJSON implements the renderer interface used within plugins
 func (u *User) RenderAsJSON(reload bool) ([]byte, error) {
 	if reload {
-		user, err := provider.userExists(u.Username)
+		user, err := provider.userExists(u.Username, "")
 		if err != nil {
 			providerLog(logger.LevelError, "unable to reload user before rendering as json: %v", err)
 			return nil, err
@@ -489,8 +489,12 @@ func (u *User) GetPermissionsForPath(p string) []string {
 	// so the first match is the one we are interested to
 	for idx := range dirsForPath {
 		if perms, ok := u.Permissions[dirsForPath[idx]]; ok {
-			permissions = perms
-			break
+			return perms
+		}
+		for dir, perms := range u.Permissions {
+			if match, err := path.Match(dir, dirsForPath[idx]); err == nil && match {
+				return perms
+			}
 		}
 	}
 	return permissions
@@ -500,7 +504,7 @@ func (u *User) getForbiddenSFTPSelfUsers(username string) ([]string, error) {
 	if allowSelfConnections == 0 {
 		return nil, nil
 	}
-	sftpUser, err := UserExists(username)
+	sftpUser, err := UserExists(username, "")
 	if err == nil {
 		err = sftpUser.LoadAndApplyGroupSettings()
 	}
@@ -600,7 +604,7 @@ func (u *User) GetVirtualFolderForPath(virtualPath string) (vfs.VirtualFolder, e
 // CheckMetadataConsistency checks the consistency between the metadata stored
 // in the configured metadata plugin and the filesystem
 func (u *User) CheckMetadataConsistency() error {
-	fs, err := u.getRootFs("")
+	fs, err := u.getRootFs(xid.New().String())
 	if err != nil {
 		return err
 	}
@@ -621,7 +625,7 @@ func (u *User) CheckMetadataConsistency() error {
 // ScanQuota scans the user home dir and virtual folders, included in its quota,
 // and returns the number of files and their size
 func (u *User) ScanQuota() (int, int64, error) {
-	fs, err := u.getRootFs("")
+	fs, err := u.getRootFs(xid.New().String())
 	if err != nil {
 		return 0, 0, err
 	}
@@ -1131,12 +1135,9 @@ func (u *User) MustSetSecondFactorForProtocol(protocol string) bool {
 }
 
 // GetSignature returns a signature for this admin.
-// It could change after an update
+// It will change after an update
 func (u *User) GetSignature() string {
-	data := []byte(fmt.Sprintf("%v_%v_%v", u.Username, u.Status, u.ExpirationDate))
-	data = append(data, []byte(u.Password)...)
-	signature := sha256.Sum256(data)
-	return base64.StdEncoding.EncodeToString(signature[:])
+	return strconv.FormatInt(u.UpdatedAt, 10)
 }
 
 // GetBandwidthForIP returns the upload and download bandwidth for the specified IP
@@ -1828,6 +1829,13 @@ func (u *User) removeDuplicatesAfterGroupMerge() {
 	u.groupSettingsApplied = true
 }
 
+func (u *User) hasRole(role string) bool {
+	if role == "" {
+		return true
+	}
+	return role == u.Role
+}
+
 func (u *User) getACopy() User {
 	u.SetEmptySecretsIfNil()
 	pubKeys := make([]string, len(u.PublicKeys))
@@ -1902,6 +1910,7 @@ func (u *User) getACopy() User {
 			Description:              u.Description,
 			CreatedAt:                u.CreatedAt,
 			UpdatedAt:                u.UpdatedAt,
+			Role:                     u.Role,
 		},
 		Filters:              filters,
 		VirtualFolders:       virtualFolders,

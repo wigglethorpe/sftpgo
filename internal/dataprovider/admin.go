@@ -15,14 +15,13 @@
 package dataprovider
 
 import (
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/alexedwards/argon2id"
@@ -57,6 +56,7 @@ const (
 	PermAdminMetadataChecks   = "metadata_checks"
 	PermAdminViewEvents       = "view_events"
 	PermAdminManageEventRules = "manage_event_rules"
+	PermAdminManageRoles      = "manage_roles"
 )
 
 const (
@@ -71,9 +71,11 @@ const (
 var (
 	validAdminPerms = []string{PermAdminAny, PermAdminAddUsers, PermAdminChangeUsers, PermAdminDeleteUsers,
 		PermAdminViewUsers, PermAdminManageGroups, PermAdminViewConnections, PermAdminCloseConnections,
-		PermAdminViewServerStatus, PermAdminManageAdmins, PermAdminManageAPIKeys, PermAdminQuotaScans,
-		PermAdminManageSystem, PermAdminManageDefender, PermAdminViewDefender, PermAdminRetentionChecks,
-		PermAdminMetadataChecks, PermAdminViewEvents}
+		PermAdminViewServerStatus, PermAdminManageAdmins, PermAdminManageRoles, PermAdminManageEventRules,
+		PermAdminManageAPIKeys, PermAdminQuotaScans, PermAdminManageSystem, PermAdminManageDefender,
+		PermAdminViewDefender, PermAdminRetentionChecks, PermAdminMetadataChecks, PermAdminViewEvents}
+	forbiddenPermsForRoleAdmins = []string{PermAdminAny, PermAdminManageAdmins, PermAdminManageSystem,
+		PermAdminManageEventRules, PermAdminManageRoles, PermAdminViewEvents}
 )
 
 // AdminTOTPConfig defines the time-based one time password configuration
@@ -124,6 +126,9 @@ type AdminPreferences struct {
 	//
 	// The settings can be combined
 	HideUserPageSections int `json:"hide_user_page_sections,omitempty"`
+	// Defines the default expiration for newly created users as number of days.
+	// 0 means no expiration
+	DefaultUsersExpiration int `json:"default_users_expiration,omitempty"`
 }
 
 // HideGroups returns true if the groups section should be hidden
@@ -253,6 +258,14 @@ type Admin struct {
 	UpdatedAt int64 `json:"updated_at"`
 	// Last login as unix timestamp in milliseconds
 	LastLogin int64 `json:"last_login"`
+	// Role name. If set the admin can only administer users with the same role.
+	// Role admins cannot have the following permissions:
+	// - manage_admins
+	// - manage_apikeys
+	// - manage_system
+	// - manage_event_rules
+	// - manage_roles
+	Role string `json:"role,omitempty"`
 }
 
 // CountUnusedRecoveryCodes returns the number of unused recovery codes
@@ -320,7 +333,13 @@ func (a *Admin) validatePermissions() error {
 	}
 	for _, perm := range a.Permissions {
 		if !util.Contains(validAdminPerms, perm) {
-			return util.NewValidationError(fmt.Sprintf("invalid permission: %#v", perm))
+			return util.NewValidationError(fmt.Sprintf("invalid permission: %q", perm))
+		}
+		if a.Role != "" {
+			if util.Contains(forbiddenPermsForRoleAdmins, perm) {
+				return util.NewValidationError(fmt.Sprintf("a role admin cannot have the following permissions: %q",
+					strings.Join(forbiddenPermsForRoleAdmins, ",")))
+			}
 		}
 	}
 	return nil
@@ -366,7 +385,7 @@ func (a *Admin) validate() error {
 		return err
 	}
 	if config.NamingRules&1 == 0 && !usernameRegex.MatchString(a.Username) {
-		return util.NewValidationError(fmt.Sprintf("username %#v is not valid, the following characters are allowed: a-zA-Z0-9-_.~", a.Username))
+		return util.NewValidationError(fmt.Sprintf("username %q is not valid, the following characters are allowed: a-zA-Z0-9-_.~", a.Username))
 	}
 	if err := a.hashPassword(); err != nil {
 		return err
@@ -548,12 +567,9 @@ func (a *Admin) CanManageMFA() bool {
 }
 
 // GetSignature returns a signature for this admin.
-// It could change after an update
+// It will change after an update
 func (a *Admin) GetSignature() string {
-	data := []byte(a.Username)
-	data = append(data, []byte(a.Password)...)
-	signature := sha256.Sum256(data)
-	return base64.StdEncoding.EncodeToString(signature[:])
+	return strconv.FormatInt(a.UpdatedAt, 10)
 }
 
 func (a *Admin) getACopy() Admin {
@@ -578,7 +594,8 @@ func (a *Admin) getACopy() Admin {
 		})
 	}
 	filters.Preferences = AdminPreferences{
-		HideUserPageSections: a.Filters.Preferences.HideUserPageSections,
+		HideUserPageSections:   a.Filters.Preferences.HideUserPageSections,
+		DefaultUsersExpiration: a.Filters.Preferences.DefaultUsersExpiration,
 	}
 	groups := make([]AdminGroupMapping, 0, len(a.Groups))
 	for _, g := range a.Groups {
@@ -604,6 +621,7 @@ func (a *Admin) getACopy() Admin {
 		LastLogin:      a.LastLogin,
 		CreatedAt:      a.CreatedAt,
 		UpdatedAt:      a.UpdatedAt,
+		Role:           a.Role,
 	}
 }
 

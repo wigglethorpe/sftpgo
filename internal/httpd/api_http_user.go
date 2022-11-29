@@ -40,7 +40,7 @@ func getUserConnection(w http.ResponseWriter, r *http.Request) (*Connection, err
 		sendAPIResponse(w, r, err, "Invalid token claims", http.StatusBadRequest)
 		return nil, fmt.Errorf("invalid token claims %w", err)
 	}
-	user, err := dataprovider.GetUserWithGroupSettings(claims.Username)
+	user, err := dataprovider.GetUserWithGroupSettings(claims.Username, "")
 	if err != nil {
 		sendAPIResponse(w, r, nil, "Unable to retrieve your user", getRespStatus(err))
 		return nil, err
@@ -119,12 +119,12 @@ func deleteUserDir(w http.ResponseWriter, r *http.Request) {
 	defer common.Connections.Remove(connection.GetID())
 
 	name := connection.User.GetCleanedPath(r.URL.Query().Get("path"))
-	err = connection.RemoveDir(name)
+	err = connection.RemoveAll(name)
 	if err != nil {
-		sendAPIResponse(w, r, err, fmt.Sprintf("Unable to delete directory %#v", name), getMappedStatusCode(err))
+		sendAPIResponse(w, r, err, fmt.Sprintf("Unable to delete directory %q", name), getMappedStatusCode(err))
 		return
 	}
-	sendAPIResponse(w, r, nil, fmt.Sprintf("Directory %#v deleted", name), http.StatusOK)
+	sendAPIResponse(w, r, nil, fmt.Sprintf("Directory %q deleted", name), http.StatusOK)
 }
 
 func getUserFile(w http.ResponseWriter, r *http.Request) {
@@ -405,7 +405,7 @@ func getUserProfile(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "Invalid token claims", http.StatusBadRequest)
 		return
 	}
-	user, err := dataprovider.UserExists(claims.Username)
+	user, err := dataprovider.UserExists(claims.Username, "")
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return
@@ -434,7 +434,7 @@ func updateUserProfile(w http.ResponseWriter, r *http.Request) {
 		sendAPIResponse(w, r, err, "", http.StatusBadRequest)
 		return
 	}
-	user, userMerged, err := dataprovider.GetUserVariants(claims.Username)
+	user, userMerged, err := dataprovider.GetUserVariants(claims.Username, "")
 	if err != nil {
 		sendAPIResponse(w, r, err, "", getRespStatus(err))
 		return

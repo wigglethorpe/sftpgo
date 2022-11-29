@@ -73,7 +73,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
             <div class="form-group row">
                 <label for="idPassword" class="col-sm-2 col-form-label">Password</label>
                 <div class="col-sm-10">
-                    <input type="password" class="form-control" id="idPassword" name="password" placeholder=""
+                    <input type="password" class="form-control" id="idPassword" name="password" placeholder="" autocomplete="new-password"
                     {{if not .IsAdd}}aria-describedby="pwdHelpBlock" {{end}}>
                     {{if not .IsAdd}}
                     <small id="pwdHelpBlock" class="form-text text-muted">
@@ -93,6 +93,26 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
                         </option>
                         {{end}}
                     </select>
+                </div>
+            </div>
+
+            <div class="card bg-light mb-3">
+                <div class="card-header">
+                    <b>Role</b>
+                </div>
+                <div class="card-body">
+                    <h6 class="card-title mb-4">Setting a role limit the administrator to only manage users with the same role. Role administrators cannot have the following permissions: "manage_admins", "manage_roles", "manage_event_rules", "manage_apikeys", "manage_system"</h6>
+                    <div class="form-group row">
+                        <label for="idRole" class="col-sm-2 col-form-label">Role</label>
+                        <div class="col-sm-10">
+                            <select class="form-control selectpicker" data-live-search="true" id="idRole" name="role">
+                                <option value=""></option>
+                                {{- range .Roles}}
+                                <option value="{{.Name}}" {{if eq $.Admin.Role .Name}}selected{{end}}>{{.Name}}</option>
+                                {{- end}}
+                            </select>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -180,6 +200,16 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
                                 <option value="6" {{if .Admin.Filters.Preferences.HideDiskQuotaAndBandwidthLimits}}selected{{end}}>Disk quota and bandwidth limits</option>
                                 <option value="7" {{if .Admin.Filters.Preferences.HideAdvancedSettings}}selected{{end}}>Advanced settings</option>
                             </select>
+                        </div>
+                    </div>
+                    <div class="form-group row">
+                        <label for="idDefaultUsersExpiration" class="col-sm-2 col-form-label">Default users expiration</label>
+                        <div class="col-sm-10">
+                            <input type="number" class="form-control" id="idDefaultUsersExpiration" name="default_users_expiration"
+                                value="{{.Admin.Filters.Preferences.DefaultUsersExpiration}}" min="0" aria-describedby="defaultUsersExpirationHelpBlock">
+                            <small id="defaultUsersExpirationHelpBlock" class="form-text text-muted">
+                                Default expiration for newly created users as number of days
+                            </small>
                         </div>
                     </div>
                 </div>

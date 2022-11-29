@@ -245,6 +245,7 @@ XMf5HU3ThYqYn3bYypZZ8nQ7BXVh4LqGNqG29wR4v6l+dLO6odXnLzfApGD9e+d4
 	tlsClient1Username  = "client1"
 	tlsClient2Username  = "client2"
 	emptyPwdPlaceholder = "empty"
+	ocMtimeHeader       = "X-OC-Mtime"
 )
 
 var (
@@ -620,7 +621,8 @@ func TestBasicHandling(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(localUser.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 	status := webdavd.GetStatus()
 	assert.True(t, status.IsActive)
 }
@@ -701,7 +703,8 @@ func TestBasicHandlingCryptFs(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 }
 
 func TestLoginEmptyPassword(t *testing.T) {
@@ -818,6 +821,66 @@ func TestLockAfterDelete(t *testing.T) {
 	assert.NoError(t, err)
 }
 
+func TestMtimeHeader(t *testing.T) {
+	u := getTestUser()
+	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
+	assert.NoError(t, err)
+
+	client := getWebDavClient(user, false, nil)
+	assert.NoError(t, checkBasicFunc(client))
+	testFilePath := filepath.Join(homeBasePath, testFileName)
+	testFileSize := int64(65535)
+	err = createTestFile(testFilePath, testFileSize)
+	assert.NoError(t, err)
+	err = uploadFileWithRawClient(testFilePath, testFileName, user.Username, defaultPassword,
+		false, testFileSize, client, dataprovider.KeyValue{Key: ocMtimeHeader, Value: "1668879480"})
+	assert.NoError(t, err)
+	// check the modification time
+	info, err := client.Stat(testFileName)
+	if assert.NoError(t, err) {
+		assert.Equal(t, time.Unix(1668879480, 0).UTC(), info.ModTime().UTC())
+	}
+	// test on overwrite
+	err = uploadFileWithRawClient(testFilePath, testFileName, user.Username, defaultPassword,
+		false, testFileSize, client, dataprovider.KeyValue{Key: ocMtimeHeader, Value: "1667879480"})
+	assert.NoError(t, err)
+	info, err = client.Stat(testFileName)
+	if assert.NoError(t, err) {
+		assert.Equal(t, time.Unix(1667879480, 0).UTC(), info.ModTime().UTC())
+	}
+	// invalid time will be silently ignored and the time set to now
+	err = uploadFileWithRawClient(testFilePath, testFileName, user.Username, defaultPassword,
+		false, testFileSize, client, dataprovider.KeyValue{Key: ocMtimeHeader, Value: "not unix time"})
+	assert.NoError(t, err)
+	info, err = client.Stat(testFileName)
+	if assert.NoError(t, err) {
+		assert.NotEqual(t, time.Unix(1667879480, 0).UTC(), info.ModTime().UTC())
+	}
+
+	req, err := http.NewRequest("MOVE", fmt.Sprintf("http://%v/%v", webDavServerAddr, testFileName), nil)
+	assert.NoError(t, err)
+	req.Header.Set("Overwrite", "T")
+	req.Header.Set("Destination", path.Join("/", testFileName+"rename"))
+	req.Header.Set(ocMtimeHeader, "1666779480")
+	req.SetBasicAuth(u.Username, u.Password)
+	httpClient := httpclient.GetHTTPClient()
+	resp, err := httpClient.Do(req)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusCreated, resp.StatusCode)
+	err = resp.Body.Close()
+	assert.NoError(t, err)
+	// check the modification time
+	info, err = client.Stat(testFileName + "rename")
+	if assert.NoError(t, err) {
+		assert.Equal(t, time.Unix(1666779480, 0).UTC(), info.ModTime().UTC())
+	}
+
+	_, err = httpdtest.RemoveUser(user, http.StatusOK)
+	assert.NoError(t, err)
+	err = os.RemoveAll(user.GetHomeDir())
+	assert.NoError(t, err)
+}
+
 func TestRenameWithLock(t *testing.T) {
 	u := getTestUser()
 	user, _, err := httpdtest.AddUser(u, http.StatusCreated)
@@ -922,12 +985,13 @@ func TestPropPatch(t *testing.T) {
 		assert.NoError(t, err)
 		err = os.RemoveAll(user.GetHomeDir())
 		assert.NoError(t, err)
-		assert.Len(t, common.Connections.GetStats(), 0)
 	}
 	_, err = httpdtest.RemoveUser(localUser, http.StatusOK)
 	assert.NoError(t, err)
 	err = os.RemoveAll(localUser.GetHomeDir())
 	assert.NoError(t, err)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 }
 
 func TestLoginInvalidPwd(t *testing.T) {
@@ -1308,7 +1372,8 @@ func TestPreDownloadHook(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 
 	common.Config.Actions.ExecuteOn = []string{common.OperationPreDownload}
 	common.Config.Actions.Hook = preDownloadPath
@@ -1357,7 +1422,8 @@ func TestPreUploadHook(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 
 	common.Config.Actions.ExecuteOn = oldExecuteOn
 	common.Config.Actions.Hook = oldHook
@@ -1419,7 +1485,8 @@ func TestMaxConnections(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 
 	common.Config.MaxTotalConnections = oldValue
 }
@@ -1450,7 +1517,8 @@ func TestMaxPerHostConnections(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 
 	common.Config.MaxPerHostConnections = oldValue
 }
@@ -1475,7 +1543,8 @@ func TestMaxSessions(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 }
 
 func TestLoginWithIPilters(t *testing.T) {
@@ -1886,7 +1955,7 @@ func TestClientClose(t *testing.T) {
 		}()
 
 		assert.Eventually(t, func() bool {
-			for _, stat := range common.Connections.GetStats() {
+			for _, stat := range common.Connections.GetStats("") {
 				if len(stat.Transfers) > 0 {
 					return true
 				}
@@ -1894,11 +1963,16 @@ func TestClientClose(t *testing.T) {
 			return false
 		}, 1*time.Second, 50*time.Millisecond)
 
-		for _, stat := range common.Connections.GetStats() {
-			common.Connections.Close(stat.ConnectionID)
+		for _, stat := range common.Connections.GetStats("") {
+			common.Connections.Close(stat.ConnectionID, "")
 		}
 		wg.Wait()
-		assert.Eventually(t, func() bool { return len(common.Connections.GetStats()) == 0 },
+		// for the sftp user a stat is done after the failed upload and
+		// this triggers a new connection
+		for _, stat := range common.Connections.GetStats("") {
+			common.Connections.Close(stat.ConnectionID, "")
+		}
+		assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
 			1*time.Second, 100*time.Millisecond)
 
 		err = os.Remove(testFilePath)
@@ -1916,7 +1990,7 @@ func TestClientClose(t *testing.T) {
 		}()
 
 		assert.Eventually(t, func() bool {
-			for _, stat := range common.Connections.GetStats() {
+			for _, stat := range common.Connections.GetStats("") {
 				if len(stat.Transfers) > 0 {
 					return true
 				}
@@ -1924,11 +1998,11 @@ func TestClientClose(t *testing.T) {
 			return false
 		}, 1*time.Second, 50*time.Millisecond)
 
-		for _, stat := range common.Connections.GetStats() {
-			common.Connections.Close(stat.ConnectionID)
+		for _, stat := range common.Connections.GetStats("") {
+			common.Connections.Close(stat.ConnectionID, "")
 		}
 		wg.Wait()
-		assert.Eventually(t, func() bool { return len(common.Connections.GetStats()) == 0 },
+		assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
 			1*time.Second, 100*time.Millisecond)
 
 		err = os.Remove(localDownloadPath)
@@ -2104,6 +2178,19 @@ func TestBytesRangeRequests(t *testing.T) {
 				assert.Equal(t, "file", string(bodyBytes))
 			}
 		}
+		// seek on a missing file
+		remotePath = fmt.Sprintf("http://%v/%v", webDavServerAddr, testFileName+"_missing")
+		req, err = http.NewRequest(http.MethodGet, remotePath, nil)
+		if assert.NoError(t, err) {
+			httpClient := httpclient.GetHTTPClient()
+			req.SetBasicAuth(user.Username, defaultPassword)
+			req.Header.Set("Range", "bytes=5-")
+			resp, err := httpClient.Do(req)
+			if assert.NoError(t, err) {
+				defer resp.Body.Close()
+				assert.Equal(t, http.StatusNotFound, resp.StatusCode)
+			}
+		}
 
 		err = os.Remove(testFilePath)
 		assert.NoError(t, err)
@@ -2197,6 +2284,17 @@ func TestGETAsPROPFIND(t *testing.T) {
 	files, err = client.ReadDir(subDir1)
 	assert.NoError(t, err)
 	assert.Len(t, files, 1)
+	// PROPFIND with infinity depth is forbidden
+	req, err = http.NewRequest(http.MethodGet, rootPath, nil)
+	if assert.NoError(t, err) {
+		req.SetBasicAuth(u.Username, u.Password)
+		req.Header.Set("Depth", "infinity")
+		resp, err := httpClient.Do(req)
+		if assert.NoError(t, err) {
+			assert.Equal(t, http.StatusForbidden, resp.StatusCode)
+			resp.Body.Close()
+		}
+	}
 
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
 	assert.NoError(t, err)
@@ -2326,28 +2424,24 @@ func TestOsErrors(t *testing.T) {
 	info, err := client.Stat(vdir)
 	assert.NoError(t, err)
 	assert.True(t, info.IsDir())
-	// now remove the folder mapped to vdir. It should not appear in directory listing
+	// now remove the folder mapped to vdir. It still appear in directory listing
+	// virtual folders are automatically added
 	err = os.RemoveAll(mappedPath)
 	assert.NoError(t, err)
 	files, err = client.ReadDir(".")
 	assert.NoError(t, err)
-	assert.Len(t, files, 0)
+	assert.Len(t, files, 1)
 	err = createTestFile(filepath.Join(user.GetHomeDir(), testFileName), 32768)
 	assert.NoError(t, err)
 	files, err = client.ReadDir(".")
 	assert.NoError(t, err)
-	if assert.Len(t, files, 1) {
-		assert.Equal(t, testFileName, files[0].Name())
-	}
-	if runtime.GOOS != osWindows {
-		// if the file cannot be accessed it should not appear in directory listing
-		err = os.Chmod(filepath.Join(user.GetHomeDir(), testFileName), 0001)
-		assert.NoError(t, err)
-		files, err = client.ReadDir(".")
-		assert.NoError(t, err)
-		assert.Len(t, files, 0)
-		err = os.Chmod(filepath.Join(user.GetHomeDir(), testFileName), os.ModePerm)
-		assert.NoError(t, err)
+	if assert.Len(t, files, 2) {
+		var names []string
+		for _, info := range files {
+			names = append(names, info.Name())
+		}
+		assert.Contains(t, names, testFileName)
+		assert.Contains(t, names, "vdir")
 	}
 
 	_, err = httpdtest.RemoveUser(user, http.StatusOK)
@@ -2803,9 +2897,18 @@ func TestSFTPLoopVirtualFolders(t *testing.T) {
 
 	contents, err := client.ReadDir("/")
 	assert.NoError(t, err)
-	if assert.Len(t, contents, 1) {
-		assert.Equal(t, testDir, contents[0].Name())
-		assert.True(t, contents[0].IsDir())
+	if assert.Len(t, contents, 2) {
+		expected := 0
+		for _, info := range contents {
+			switch info.Name() {
+			case testDir, "vdir":
+				assert.True(t, info.IsDir())
+				expected++
+			default:
+				t.Errorf("unexpected file/dir %q", info.Name())
+			}
+		}
+		assert.Equal(t, expected, 2)
 	}
 
 	_, err = httpdtest.RemoveUser(user1, http.StatusOK)
@@ -2922,7 +3025,8 @@ func TestNestedVirtualFolders(t *testing.T) {
 	assert.NoError(t, err)
 	err = os.RemoveAll(localUser.GetHomeDir())
 	assert.NoError(t, err)
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 },
+		1*time.Second, 100*time.Millisecond)
 }
 
 func checkBasicFunc(client *gowebdav.Client) error {
@@ -2946,7 +3050,7 @@ func checkFileSize(remoteDestPath string, expectedSize int64, client *gowebdav.C
 }
 
 func uploadFileWithRawClient(localSourcePath string, remoteDestPath string, username, password string,
-	useTLS bool, expectedSize int64, client *gowebdav.Client,
+	useTLS bool, expectedSize int64, client *gowebdav.Client, headers ...dataprovider.KeyValue,
 ) error {
 	srcFile, err := os.Open(localSourcePath)
 	if err != nil {
@@ -2969,6 +3073,9 @@ func uploadFileWithRawClient(localSourcePath string, remoteDestPath string, user
 		return err
 	}
 	req.SetBasicAuth(username, password)
+	for _, kv := range headers {
+		req.Header.Set(kv.Key, kv.Value)
+	}
 	httpClient := &http.Client{Timeout: 10 * time.Second}
 	if tlsConfig != nil {
 		customTransport := http.DefaultTransport.(*http.Transport).Clone()

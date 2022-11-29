@@ -19,7 +19,6 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/xml"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -31,10 +30,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/drakkan/webdav"
 	"github.com/eikenb/pipeat"
 	"github.com/sftpgo/sdk"
 	"github.com/stretchr/testify/assert"
-	"golang.org/x/net/webdav"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
@@ -272,11 +271,6 @@ xr5cb9VBRBtB9aOKVfuRhpatAfS2Pzm2Htae9lFn7slGPUmu2hkjDw==
 -----END RSA PRIVATE KEY-----`
 )
 
-var (
-	errWalkDir  = errors.New("err walk dir")
-	errWalkFile = errors.New("err walk file")
-)
-
 // MockOsFs mockable OsFs
 type MockOsFs struct {
 	vfs.Fs
@@ -292,7 +286,10 @@ func (fs *MockOsFs) Name() string {
 
 // Open returns nil
 func (fs *MockOsFs) Open(name string, offset int64) (vfs.File, *pipeat.PipeReaderAt, func(), error) {
-	return nil, fs.reader, nil, nil
+	if fs.reader != nil {
+		return nil, fs.reader, nil, nil
+	}
+	return fs.Fs.Open(name, offset)
 }
 
 // IsUploadResumeSupported returns true if resuming uploads is supported
@@ -315,83 +312,23 @@ func (fs *MockOsFs) Remove(name string, isDir bool) error {
 
 // Rename renames (moves) source to target
 func (fs *MockOsFs) Rename(source, target string) error {
-	if fs.err != nil {
-		return fs.err
-	}
 	return os.Rename(source, target)
-}
-
-// Walk returns a duplicate path for testing
-func (fs *MockOsFs) Walk(root string, walkFn filepath.WalkFunc) error {
-	if fs.err == errWalkDir {
-		walkFn("fsdpath", vfs.NewFileInfo("dpath", true, 0, time.Now(), false), nil) //nolint:errcheck
-		walkFn("fsdpath", vfs.NewFileInfo("dpath", true, 0, time.Now(), false), nil) //nolint:errcheck
-		return nil
-	}
-	walkFn("fsfpath", vfs.NewFileInfo("fpath", false, 0, time.Now(), false), nil) //nolint:errcheck
-	return fs.err
 }
 
 // GetMimeType returns the content type
 func (fs *MockOsFs) GetMimeType(name string) (string, error) {
+	if fs.err != nil {
+		return "", fs.err
+	}
 	return "application/custom-mime", nil
 }
 
-func newMockOsFs(err error, atomicUpload bool, connectionID, rootDir string, reader *pipeat.PipeReaderAt) vfs.Fs {
+func newMockOsFs(atomicUpload bool, connectionID, rootDir string, reader *pipeat.PipeReaderAt, err error) vfs.Fs {
 	return &MockOsFs{
 		Fs:                      vfs.NewOsFs(connectionID, rootDir, ""),
-		err:                     err,
 		isAtomicUploadSupported: atomicUpload,
 		reader:                  reader,
-	}
-}
-
-func TestOrderDirsToRemove(t *testing.T) {
-	user := dataprovider.User{}
-	fs := vfs.NewOsFs("id", os.TempDir(), "")
-	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(fs.ConnectionID(), common.ProtocolWebDAV, "", "", user),
-		request:        nil,
-	}
-	dirsToRemove := []objectMapping{}
-
-	orderedDirs := connection.orderDirsToRemove(fs, dirsToRemove)
-	assert.Equal(t, len(dirsToRemove), len(orderedDirs))
-
-	dirsToRemove = []objectMapping{
-		{
-			fsPath:      "dir1",
-			virtualPath: "",
-		},
-	}
-	orderedDirs = connection.orderDirsToRemove(fs, dirsToRemove)
-	assert.Equal(t, len(dirsToRemove), len(orderedDirs))
-
-	dirsToRemove = []objectMapping{
-		{
-			fsPath:      "dir1",
-			virtualPath: "",
-		},
-		{
-			fsPath:      "dir12",
-			virtualPath: "",
-		},
-		{
-			fsPath:      filepath.Join("dir1", "a", "b"),
-			virtualPath: "",
-		},
-		{
-			fsPath:      filepath.Join("dir1", "a"),
-			virtualPath: "",
-		},
-	}
-
-	orderedDirs = connection.orderDirsToRemove(fs, dirsToRemove)
-	if assert.Equal(t, len(dirsToRemove), len(orderedDirs)) {
-		assert.Equal(t, "dir12", orderedDirs[0].fsPath)
-		assert.Equal(t, filepath.Join("dir1", "a", "b"), orderedDirs[1].fsPath)
-		assert.Equal(t, filepath.Join("dir1", "a"), orderedDirs[2].fsPath)
-		assert.Equal(t, "dir1", orderedDirs[3].fsPath)
+		err:                     err,
 	}
 }
 
@@ -533,6 +470,7 @@ func TestConnWithNilRequest(t *testing.T) {
 	assert.Empty(t, c.GetClientVersion())
 	assert.Empty(t, c.GetCommand())
 	assert.Empty(t, c.GetRemoteAddress())
+	assert.True(t, c.getModificationTime().IsZero())
 }
 
 func TestResolvePathErrors(t *testing.T) {
@@ -622,38 +560,31 @@ func TestFileAccessErrors(t *testing.T) {
 	missingPath := "missing path"
 	fsMissingPath := filepath.Join(user.HomeDir, missingPath)
 	err := connection.RemoveAll(ctx, missingPath)
-	if assert.Error(t, err) {
-		assert.EqualError(t, err, os.ErrNotExist.Error())
-	}
-	_, err = connection.getFile(fs, fsMissingPath, missingPath)
-	if assert.Error(t, err) {
-		assert.EqualError(t, err, os.ErrNotExist.Error())
-	}
-	_, err = connection.getFile(fs, fsMissingPath, missingPath)
-	if assert.Error(t, err) {
-		assert.EqualError(t, err, os.ErrNotExist.Error())
-	}
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	davFile, err := connection.getFile(fs, fsMissingPath, missingPath)
+	assert.NoError(t, err)
+	buf := make([]byte, 64)
+	_, err = davFile.Read(buf)
+	assert.ErrorIs(t, err, os.ErrNotExist)
+	err = davFile.Close()
+	assert.ErrorIs(t, err, os.ErrNotExist)
 	p := filepath.Join(user.HomeDir, "adir", missingPath)
 	_, err = connection.handleUploadToNewFile(fs, p, p, path.Join("adir", missingPath))
-	if assert.Error(t, err) {
-		assert.EqualError(t, err, os.ErrNotExist.Error())
-	}
+	assert.ErrorIs(t, err, os.ErrNotExist)
 	_, err = connection.handleUploadToExistingFile(fs, p, "_"+p, 0, path.Join("adir", missingPath))
 	if assert.Error(t, err) {
 		assert.ErrorIs(t, err, os.ErrNotExist)
 	}
 
-	fs = newMockOsFs(nil, false, fs.ConnectionID(), user.HomeDir, nil)
+	fs = newMockOsFs(false, fs.ConnectionID(), user.HomeDir, nil, nil)
 	_, err = connection.handleUploadToExistingFile(fs, p, p, 0, path.Join("adir", missingPath))
-	if assert.Error(t, err) {
-		assert.ErrorIs(t, err, os.ErrNotExist)
-	}
+	assert.ErrorIs(t, err, os.ErrNotExist)
 
 	f, err := os.CreateTemp("", "temp")
 	assert.NoError(t, err)
 	err = f.Close()
 	assert.NoError(t, err)
-	davFile, err := connection.handleUploadToExistingFile(fs, f.Name(), f.Name(), 123, f.Name())
+	davFile, err = connection.handleUploadToExistingFile(fs, f.Name(), f.Name(), 123, f.Name())
 	if assert.NoError(t, err) {
 		transfer := davFile.(*webDavFile)
 		transfers := connection.GetTransfers()
@@ -706,59 +637,6 @@ func TestFileAccessErrors(t *testing.T) {
 	}
 }
 
-func TestRemoveDirTree(t *testing.T) {
-	user := dataprovider.User{
-		BaseUser: sdk.BaseUser{
-			HomeDir: filepath.Clean(os.TempDir()),
-		},
-	}
-	user.Permissions = make(map[string][]string)
-	user.Permissions["/"] = []string{dataprovider.PermAny}
-	fs := vfs.NewOsFs("connID", user.HomeDir, "")
-	connection := &Connection{
-		BaseConnection: common.NewBaseConnection(fs.ConnectionID(), common.ProtocolWebDAV, "", "", user),
-	}
-
-	vpath := path.Join("adir", "missing")
-	p := filepath.Join(user.HomeDir, "adir", "missing")
-	err := connection.removeDirTree(fs, p, vpath)
-	if assert.Error(t, err) {
-		assert.True(t, fs.IsNotExist(err))
-	}
-
-	fs = newMockOsFs(nil, false, "mockID", user.HomeDir, nil)
-	err = connection.removeDirTree(fs, p, vpath)
-	if assert.Error(t, err) {
-		assert.True(t, fs.IsNotExist(err), "unexpected error: %v", err)
-	}
-
-	errFake := errors.New("fake err")
-	fs = newMockOsFs(errFake, false, "mockID", user.HomeDir, nil)
-	err = connection.removeDirTree(fs, p, vpath)
-	if assert.Error(t, err) {
-		assert.EqualError(t, err, errFake.Error())
-	}
-
-	fs = newMockOsFs(errWalkDir, true, "mockID", user.HomeDir, nil)
-	err = connection.removeDirTree(fs, p, vpath)
-	if assert.Error(t, err) {
-		assert.True(t, fs.IsPermission(err), "unexpected error: %v", err)
-	}
-
-	fs = newMockOsFs(errWalkFile, false, "mockID", user.HomeDir, nil)
-	err = connection.removeDirTree(fs, p, vpath)
-	if assert.Error(t, err) {
-		assert.EqualError(t, err, errWalkFile.Error())
-	}
-
-	connection.User.Permissions["/"] = []string{dataprovider.PermListItems}
-	fs = newMockOsFs(nil, false, "mockID", user.HomeDir, nil)
-	err = connection.removeDirTree(fs, p, vpath)
-	if assert.Error(t, err) {
-		assert.EqualError(t, err, common.ErrPermissionDenied.Error())
-	}
-}
-
 func TestContentType(t *testing.T) {
 	user := dataprovider.User{
 		BaseUser: sdk.BaseUser{
@@ -773,9 +651,9 @@ func TestContentType(t *testing.T) {
 	}
 	testFilePath := filepath.Join(user.HomeDir, testFile)
 	ctx := context.Background()
-	baseTransfer := common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath, testFilePath, testFile,
+	baseTransfer := common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath, testFilePath, testFile+".unknown",
 		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
-	fs = newMockOsFs(nil, false, fs.ConnectionID(), user.GetHomeDir(), nil)
+	fs = newMockOsFs(false, fs.ConnectionID(), user.GetHomeDir(), nil, nil)
 	err := os.WriteFile(testFilePath, []byte(""), os.ModePerm)
 	assert.NoError(t, err)
 	davFile := newWebDavFile(baseTransfer, nil, nil)
@@ -791,6 +669,8 @@ func TestContentType(t *testing.T) {
 	err = davFile.Close()
 	assert.NoError(t, err)
 
+	baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath, testFilePath, testFile+".unknown1",
+		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
 	davFile = newWebDavFile(baseTransfer, nil, nil)
 	davFile.Fs = vfs.NewOsFs("id", user.HomeDir, "")
 	fi, err = davFile.Stat()
@@ -802,9 +682,53 @@ func TestContentType(t *testing.T) {
 	err = davFile.Close()
 	assert.NoError(t, err)
 
-	fi.(*webDavFileInfo).fsPath = "missing"
-	_, err = fi.(*webDavFileInfo).ContentType(ctx)
-	assert.EqualError(t, err, webdav.ErrNotImplemented.Error())
+	baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath, testFilePath, testFile,
+		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
+	davFile = newWebDavFile(baseTransfer, nil, nil)
+	davFile.Fs = vfs.NewOsFs("id", user.HomeDir, "")
+	fi, err = davFile.Stat()
+	if assert.NoError(t, err) {
+		ctype, err := fi.(*webDavFileInfo).ContentType(ctx)
+		assert.NoError(t, err)
+		assert.Equal(t, "application/octet-stream", ctype)
+	}
+	err = davFile.Close()
+	assert.NoError(t, err)
+
+	for i := 0; i < 2; i++ {
+		// the second time the cache will be used
+		baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath, testFilePath, testFile+".custom",
+			common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
+		davFile = newWebDavFile(baseTransfer, nil, nil)
+		davFile.Fs = vfs.NewOsFs("id", user.HomeDir, "")
+		fi, err = davFile.Stat()
+		if assert.NoError(t, err) {
+			ctype, err := fi.(*webDavFileInfo).ContentType(ctx)
+			assert.NoError(t, err)
+			assert.Equal(t, "text/plain; charset=utf-8", ctype)
+		}
+		err = davFile.Close()
+		assert.NoError(t, err)
+	}
+
+	baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath, testFilePath, testFile+".unknown2",
+		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{})
+	fs = newMockOsFs(false, fs.ConnectionID(), user.GetHomeDir(), nil, os.ErrInvalid)
+	davFile = newWebDavFile(baseTransfer, nil, nil)
+	davFile.Fs = fs
+	fi, err = davFile.Stat()
+	if assert.NoError(t, err) {
+		ctype, err := fi.(*webDavFileInfo).ContentType(ctx)
+		assert.EqualError(t, err, webdav.ErrNotImplemented.Error(), "unexpected content type %q", ctype)
+	}
+	cache := mimeCache{
+		maxSize:   10,
+		mimeTypes: map[string]string{},
+	}
+	cache.addMimeToCache("", "")
+	cache.RLock()
+	assert.Len(t, cache.mimeTypes, 0)
+	cache.RUnlock()
 
 	err = os.Remove(testFilePath)
 	assert.NoError(t, err)
@@ -873,7 +797,7 @@ func TestTransferReadWriteErrors(t *testing.T) {
 
 	r, w, err = pipeat.Pipe()
 	assert.NoError(t, err)
-	mockFs := newMockOsFs(nil, false, fs.ConnectionID(), user.HomeDir, r)
+	mockFs := newMockOsFs(false, fs.ConnectionID(), user.HomeDir, r, nil)
 	baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath, testFilePath, testFile,
 		common.TransferDownload, 0, 0, 0, 0, false, mockFs, dataprovider.TransferQuota{})
 	davFile = newWebDavFile(baseTransfer, nil, nil)
@@ -913,7 +837,7 @@ func TestTransferSeek(t *testing.T) {
 	}
 	user.Permissions = make(map[string][]string)
 	user.Permissions["/"] = []string{dataprovider.PermAny}
-	fs := vfs.NewOsFs("connID", user.HomeDir, "")
+	fs := newMockOsFs(true, "connID", user.HomeDir, nil, nil)
 	connection := &Connection{
 		BaseConnection: common.NewBaseConnection(fs.ConnectionID(), common.ProtocolWebDAV, "", "", user),
 	}
@@ -954,6 +878,8 @@ func TestTransferSeek(t *testing.T) {
 	res, err := davFile.Seek(0, io.SeekStart)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(0), res)
+	err = davFile.Close()
+	assert.NoError(t, err)
 	davFile.Connection.RemoveTransfer(davFile.BaseTransfer)
 
 	davFile = newWebDavFile(baseTransfer, nil, nil)
@@ -961,8 +887,18 @@ func TestTransferSeek(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, int64(len(testFileContents)), res)
 	err = davFile.updateStatInfo()
-	assert.Nil(t, err)
+	assert.NoError(t, err)
+	err = davFile.Close()
+	assert.NoError(t, err)
 
+	baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath+"1", testFilePath+"1", testFile,
+		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{AllowedTotalSize: 100})
+	davFile = newWebDavFile(baseTransfer, nil, nil)
+	_, err = davFile.Seek(0, io.SeekEnd)
+	assert.True(t, fs.IsNotExist(err))
+	davFile.Connection.RemoveTransfer(davFile.BaseTransfer)
+
+	fs = vfs.NewOsFs(fs.ConnectionID(), user.GetHomeDir(), "")
 	baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath+"1", testFilePath+"1", testFile,
 		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{AllowedTotalSize: 100})
 	davFile = newWebDavFile(baseTransfer, nil, nil)
@@ -974,27 +910,35 @@ func TestTransferSeek(t *testing.T) {
 		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{AllowedTotalSize: 100})
 	davFile = newWebDavFile(baseTransfer, nil, nil)
 	davFile.reader = f
-	davFile.Fs = newMockOsFs(nil, true, fs.ConnectionID(), user.GetHomeDir(), nil)
+	r, _, err := pipeat.Pipe()
+	assert.NoError(t, err)
+	davFile.Fs = newMockOsFs(true, fs.ConnectionID(), user.GetHomeDir(), r, nil)
 	res, err = davFile.Seek(2, io.SeekStart)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(2), res)
+	err = davFile.Close()
+	assert.NoError(t, err)
 
+	r, _, err = pipeat.Pipe()
+	assert.NoError(t, err)
 	davFile = newWebDavFile(baseTransfer, nil, nil)
-	davFile.Fs = newMockOsFs(nil, true, fs.ConnectionID(), user.GetHomeDir(), nil)
+	davFile.Fs = newMockOsFs(true, fs.ConnectionID(), user.GetHomeDir(), r, nil)
 	res, err = davFile.Seek(2, io.SeekEnd)
 	assert.NoError(t, err)
 	assert.Equal(t, int64(5), res)
+	err = davFile.Close()
+	assert.NoError(t, err)
 
 	baseTransfer = common.NewBaseTransfer(nil, connection.BaseConnection, nil, testFilePath+"1", testFilePath+"1", testFile,
 		common.TransferDownload, 0, 0, 0, 0, false, fs, dataprovider.TransferQuota{AllowedTotalSize: 100})
 
 	davFile = newWebDavFile(baseTransfer, nil, nil)
-	davFile.Fs = newMockOsFs(nil, true, fs.ConnectionID(), user.GetHomeDir(), nil)
+	davFile.Fs = newMockOsFs(true, fs.ConnectionID(), user.GetHomeDir(), nil, nil)
 	res, err = davFile.Seek(2, io.SeekEnd)
 	assert.True(t, fs.IsNotExist(err))
 	assert.Equal(t, int64(0), res)
 
-	assert.Len(t, common.Connections.GetStats(), 0)
+	assert.Len(t, common.Connections.GetStats(""), 0)
 
 	err = os.Remove(testFilePath)
 	assert.NoError(t, err)
@@ -1016,7 +960,7 @@ func TestBasicUsersCache(t *testing.T) {
 	u.Permissions["/"] = []string{dataprovider.PermAny}
 	err := dataprovider.AddUser(&u, "", "")
 	assert.NoError(t, err)
-	user, err := dataprovider.UserExists(u.Username)
+	user, err := dataprovider.UserExists(u.Username, "")
 	assert.NoError(t, err)
 
 	c := &Configuration{
@@ -1111,7 +1055,7 @@ func TestBasicUsersCache(t *testing.T) {
 	_, ok = dataprovider.GetCachedWebDAVUser(username)
 	assert.True(t, ok)
 	// cache is invalidated after user deletion
-	err = dataprovider.DeleteUser(user.Username, "", "")
+	err = dataprovider.DeleteUser(user.Username, "", "", "")
 	assert.NoError(t, err)
 	_, ok = dataprovider.GetCachedWebDAVUser(username)
 	assert.False(t, ok)
@@ -1147,7 +1091,7 @@ func TestCachedUserWithFolders(t *testing.T) {
 	})
 	err := dataprovider.AddUser(&u, "", "")
 	assert.NoError(t, err)
-	user, err := dataprovider.UserExists(u.Username)
+	user, err := dataprovider.UserExists(u.Username, "")
 	assert.NoError(t, err)
 
 	c := &Configuration{
@@ -1234,7 +1178,7 @@ func TestCachedUserWithFolders(t *testing.T) {
 		assert.False(t, cachedUser.IsExpired())
 	}
 
-	err = dataprovider.DeleteUser(user.Username, "", "")
+	err = dataprovider.DeleteUser(user.Username, "", "", "")
 	assert.NoError(t, err)
 	_, ok = dataprovider.GetCachedWebDAVUser(username)
 	assert.False(t, ok)
@@ -1262,25 +1206,25 @@ func TestUsersCacheSizeAndExpiration(t *testing.T) {
 	u.Permissions["/"] = []string{dataprovider.PermAny}
 	err := dataprovider.AddUser(&u, "", "")
 	assert.NoError(t, err)
-	user1, err := dataprovider.UserExists(u.Username)
+	user1, err := dataprovider.UserExists(u.Username, "")
 	assert.NoError(t, err)
 	u.Username = username + "2"
 	u.Password = password + "2"
 	err = dataprovider.AddUser(&u, "", "")
 	assert.NoError(t, err)
-	user2, err := dataprovider.UserExists(u.Username)
+	user2, err := dataprovider.UserExists(u.Username, "")
 	assert.NoError(t, err)
 	u.Username = username + "3"
 	u.Password = password + "3"
 	err = dataprovider.AddUser(&u, "", "")
 	assert.NoError(t, err)
-	user3, err := dataprovider.UserExists(u.Username)
+	user3, err := dataprovider.UserExists(u.Username, "")
 	assert.NoError(t, err)
 	u.Username = username + "4"
 	u.Password = password + "4"
 	err = dataprovider.AddUser(&u, "", "")
 	assert.NoError(t, err)
-	user4, err := dataprovider.UserExists(u.Username)
+	user4, err := dataprovider.UserExists(u.Username, "")
 	assert.NoError(t, err)
 
 	c := &Configuration{
@@ -1442,13 +1386,13 @@ func TestUsersCacheSizeAndExpiration(t *testing.T) {
 	_, ok = dataprovider.GetCachedWebDAVUser(user4.Username)
 	assert.True(t, ok)
 
-	err = dataprovider.DeleteUser(user1.Username, "", "")
+	err = dataprovider.DeleteUser(user1.Username, "", "", "")
 	assert.NoError(t, err)
-	err = dataprovider.DeleteUser(user2.Username, "", "")
+	err = dataprovider.DeleteUser(user2.Username, "", "", "")
 	assert.NoError(t, err)
-	err = dataprovider.DeleteUser(user3.Username, "", "")
+	err = dataprovider.DeleteUser(user3.Username, "", "", "")
 	assert.NoError(t, err)
-	err = dataprovider.DeleteUser(user4.Username, "", "")
+	err = dataprovider.DeleteUser(user4.Username, "", "", "")
 	assert.NoError(t, err)
 
 	err = os.RemoveAll(u.GetHomeDir())
@@ -1472,7 +1416,7 @@ func TestUserCacheIsolation(t *testing.T) {
 	u.Permissions["/"] = []string{dataprovider.PermAny}
 	err := dataprovider.AddUser(&u, "", "")
 	assert.NoError(t, err)
-	user, err := dataprovider.UserExists(u.Username)
+	user, err := dataprovider.UserExists(u.Username, "")
 	assert.NoError(t, err)
 	cachedUser := &dataprovider.CachedUser{
 		User:       user,
@@ -1506,7 +1450,7 @@ func TestUserCacheIsolation(t *testing.T) {
 		assert.False(t, cachedUser.User.FsConfig.S3Config.AccessSecret.IsEncrypted())
 	}
 
-	err = dataprovider.DeleteUser(username, "", "")
+	err = dataprovider.DeleteUser(username, "", "", "")
 	assert.NoError(t, err)
 	_, ok = dataprovider.GetCachedWebDAVUser(username)
 	assert.False(t, ok)

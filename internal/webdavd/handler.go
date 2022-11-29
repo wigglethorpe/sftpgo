@@ -19,10 +19,11 @@ import (
 	"net/http"
 	"os"
 	"path"
+	"strconv"
 	"strings"
+	"time"
 
-	"github.com/eikenb/pipeat"
-	"golang.org/x/net/webdav"
+	"github.com/drakkan/webdav"
 
 	"github.com/drakkan/sftpgo/v2/internal/common"
 	"github.com/drakkan/sftpgo/v2/internal/dataprovider"
@@ -35,6 +36,18 @@ import (
 type Connection struct {
 	*common.BaseConnection
 	request *http.Request
+}
+
+func (c *Connection) getModificationTime() time.Time {
+	if c.request == nil {
+		return time.Time{}
+	}
+	if val := c.request.Header.Get("X-OC-Mtime"); val != "" {
+		if unixTime, err := strconv.ParseInt(val, 10, 64); err == nil {
+			return time.Unix(unixTime, 0)
+		}
+	}
+	return time.Time{}
 }
 
 // GetClientVersion returns the connected client's version.
@@ -86,7 +99,19 @@ func (c *Connection) Rename(ctx context.Context, oldName, newName string) error 
 	oldName = util.CleanPath(oldName)
 	newName = util.CleanPath(newName)
 
-	return c.BaseConnection.Rename(oldName, newName)
+	err := c.BaseConnection.Rename(oldName, newName)
+	if err == nil {
+		if mtime := c.getModificationTime(); !mtime.IsZero() {
+			attrs := &common.StatAttributes{
+				Flags: common.StatAttrTimes,
+				Atime: mtime,
+				Mtime: mtime,
+			}
+			setStatErr := c.SetStat(newName, attrs)
+			c.Log(logger.LevelDebug, "mtime header found for %q, value: %s, err: %v", newName, mtime, setStatErr)
+		}
+	}
+	return err
 }
 
 // Stat returns a FileInfo describing the named file/directory, or an error,
@@ -112,21 +137,7 @@ func (c *Connection) RemoveAll(ctx context.Context, name string) error {
 	c.UpdateLastActivity()
 
 	name = util.CleanPath(name)
-	fs, p, err := c.GetFsAndResolvedPath(name)
-	if err != nil {
-		return err
-	}
-
-	var fi os.FileInfo
-	if fi, err = fs.Lstat(p); err != nil {
-		c.Log(logger.LevelDebug, "failed to remove file %#v: stat error: %+v", p, err)
-		return c.GetFsError(fs, err)
-	}
-
-	if fi.IsDir() && fi.Mode()&os.ModeSymlink == 0 {
-		return c.removeDirTree(fs, p, name)
-	}
-	return c.RemoveFile(fs, p, name, fi)
+	return c.BaseConnection.RemoveAll(name)
 }
 
 // OpenFile opens the named file with specified flag.
@@ -148,25 +159,13 @@ func (c *Connection) OpenFile(ctx context.Context, name string, flag int, perm o
 }
 
 func (c *Connection) getFile(fs vfs.Fs, fsPath, virtualPath string) (webdav.File, error) {
-	var err error
-	var file vfs.File
-	var r *pipeat.PipeReaderAt
 	var cancelFn func()
 
-	// for cloud fs we open the file when we receive the first read to avoid to download the first part of
-	// the file if it was opened only to do a stat or a readdir and so it is not a real download
-	if vfs.IsLocalOrUnbufferedSFTPFs(fs) {
-		file, r, cancelFn, err = fs.Open(fsPath, 0)
-		if err != nil {
-			c.Log(logger.LevelError, "could not open file %#v for reading: %+v", fsPath, err)
-			return nil, c.GetFsError(fs, err)
-		}
-	}
-
-	baseTransfer := common.NewBaseTransfer(file, c.BaseConnection, cancelFn, fsPath, fsPath, virtualPath,
+	// we open the file when we receive the first read so we only open the file if necessary
+	baseTransfer := common.NewBaseTransfer(nil, c.BaseConnection, cancelFn, fsPath, fsPath, virtualPath,
 		common.TransferDownload, 0, 0, 0, 0, false, fs, c.GetTransferQuota())
 
-	return newWebDavFile(baseTransfer, nil, r), nil
+	return newWebDavFile(baseTransfer, nil, nil), nil
 }
 
 func (c *Connection) putFile(fs vfs.Fs, fsPath, virtualPath string) (webdav.File, error) {
@@ -229,6 +228,8 @@ func (c *Connection) handleUploadToNewFile(fs vfs.Fs, resolvedPath, filePath, re
 
 	baseTransfer := common.NewBaseTransfer(file, c.BaseConnection, cancelFn, resolvedPath, filePath, requestPath,
 		common.TransferUpload, 0, 0, maxWriteSize, 0, true, fs, transferQuota)
+	mtime := c.getModificationTime()
+	baseTransfer.SetTimes(resolvedPath, mtime, mtime)
 
 	return newWebDavFile(baseTransfer, w, nil), nil
 }
@@ -287,114 +288,8 @@ func (c *Connection) handleUploadToExistingFile(fs vfs.Fs, resolvedPath, filePat
 
 	baseTransfer := common.NewBaseTransfer(file, c.BaseConnection, cancelFn, resolvedPath, filePath, requestPath,
 		common.TransferUpload, 0, initialSize, maxWriteSize, truncatedSize, false, fs, transferQuota)
+	mtime := c.getModificationTime()
+	baseTransfer.SetTimes(resolvedPath, mtime, mtime)
 
 	return newWebDavFile(baseTransfer, w, nil), nil
-}
-
-type objectMapping struct {
-	fsPath      string
-	virtualPath string
-	info        os.FileInfo
-}
-
-func (c *Connection) removeDirTree(fs vfs.Fs, fsPath, virtualPath string) error {
-	var dirsToRemove []objectMapping
-	var filesToRemove []objectMapping
-
-	err := fs.Walk(fsPath, func(walkedPath string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		obj := objectMapping{
-			fsPath:      walkedPath,
-			virtualPath: fs.GetRelativePath(walkedPath),
-			info:        info,
-		}
-		if info.IsDir() {
-			err = c.IsRemoveDirAllowed(fs, obj.fsPath, obj.virtualPath)
-			isDuplicated := false
-			for _, d := range dirsToRemove {
-				if d.fsPath == obj.fsPath {
-					isDuplicated = true
-					break
-				}
-			}
-			if !isDuplicated {
-				dirsToRemove = append(dirsToRemove, obj)
-			}
-		} else {
-			err = c.IsRemoveFileAllowed(obj.virtualPath)
-			filesToRemove = append(filesToRemove, obj)
-		}
-		if err != nil {
-			c.Log(logger.LevelDebug, "unable to remove dir tree, object %#v->%#v cannot be removed: %v",
-				virtualPath, fsPath, err)
-			return err
-		}
-
-		return nil
-	})
-	if err != nil {
-		c.Log(logger.LevelError, "failed to remove dir tree %#v->%#v: error: %+v", virtualPath, fsPath, err)
-		return err
-	}
-
-	for _, fileObj := range filesToRemove {
-		err = c.RemoveFile(fs, fileObj.fsPath, fileObj.virtualPath, fileObj.info)
-		if err != nil {
-			c.Log(logger.LevelDebug, "unable to remove dir tree, error removing file %#v->%#v: %v",
-				fileObj.virtualPath, fileObj.fsPath, err)
-			return err
-		}
-	}
-
-	for _, dirObj := range c.orderDirsToRemove(fs, dirsToRemove) {
-		err = c.RemoveDir(dirObj.virtualPath)
-		if err != nil {
-			c.Log(logger.LevelDebug, "unable to remove dir tree, error removing directory %#v->%#v: %v",
-				dirObj.virtualPath, dirObj.fsPath, err)
-			return err
-		}
-	}
-
-	return err
-}
-
-// order directories so that the empty ones will be at slice start
-func (c *Connection) orderDirsToRemove(fs vfs.Fs, dirsToRemove []objectMapping) []objectMapping {
-	orderedDirs := make([]objectMapping, 0, len(dirsToRemove))
-	removedDirs := make([]string, 0, len(dirsToRemove))
-
-	pathSeparator := "/"
-	if vfs.IsLocalOsFs(fs) {
-		pathSeparator = string(os.PathSeparator)
-	}
-
-	for len(orderedDirs) < len(dirsToRemove) {
-		for idx, d := range dirsToRemove {
-			if util.Contains(removedDirs, d.fsPath) {
-				continue
-			}
-			isEmpty := true
-			for idx1, d1 := range dirsToRemove {
-				if idx == idx1 {
-					continue
-				}
-				if util.Contains(removedDirs, d1.fsPath) {
-					continue
-				}
-				if strings.HasPrefix(d1.fsPath, d.fsPath+pathSeparator) {
-					isEmpty = false
-					break
-				}
-			}
-			if isEmpty {
-				orderedDirs = append(orderedDirs, d)
-				removedDirs = append(removedDirs, d.fsPath)
-			}
-		}
-	}
-
-	return orderedDirs
 }

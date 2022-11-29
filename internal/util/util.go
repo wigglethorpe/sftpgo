@@ -125,6 +125,18 @@ func Contains[T comparable](elems []T, v T) bool {
 	return false
 }
 
+// Remove removes an element from a string slice and
+// returns the modified slice
+func Remove(elems []string, val string) []string {
+	for idx, v := range elems {
+		if v == val {
+			elems[idx] = elems[len(elems)-1]
+			return elems[:len(elems)-1]
+		}
+	}
+	return elems
+}
+
 // IsStringPrefixInSlice searches a string prefix in a slice and returns true
 // if a matching prefix is found
 func IsStringPrefixInSlice(obj string, list []string) bool {
@@ -617,8 +629,8 @@ func GetSSHPublicKeyAsString(pubKey []byte) (string, error) {
 	return string(ssh.MarshalAuthorizedKey(k)), nil
 }
 
-// GetRealIP returns the ip address as result of parsing either the
-// X-Real-IP header or the X-Forwarded-For header
+// GetRealIP returns the ip address as result of parsing the specified
+// header and using the specified depth
 func GetRealIP(r *http.Request, header string, depth int) string {
 	if header == "" {
 		return ""
@@ -726,4 +738,20 @@ func PanicOnError(err error) {
 	if err != nil {
 		panic(fmt.Errorf("unexpected error: %w", err))
 	}
+}
+
+// GetAbsolutePath returns an absolute path using the current dir as base
+// if name defines a relative path
+func GetAbsolutePath(name string) (string, error) {
+	if name == "" {
+		return name, errors.New("input path cannot be empty")
+	}
+	if filepath.IsAbs(name) {
+		return name, nil
+	}
+	curDir, err := os.Getwd()
+	if err != nil {
+		return name, err
+	}
+	return filepath.Join(curDir, name), nil
 }

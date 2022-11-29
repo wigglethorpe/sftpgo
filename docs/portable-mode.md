@@ -15,12 +15,6 @@ Usage:
   sftpgo portable [flags]
 
 Flags:
-  -C, --advertise-credentials           If the SFTP/FTP service is
-                                        advertised via multicast DNS, this
-                                        flag allows to put username/password
-                                        inside the advertised TXT record
-  -S, --advertise-service               Advertise configured services using
-                                        multicast DNS
       --allowed-patterns stringArray    Allowed file patterns case insensitive.
                                         The format is:
                                         /dir::pattern1,pattern2.
@@ -74,6 +68,12 @@ Flags:
                                         virtual folder identified by this
                                         prefix and its contents
       --gcs-storage-class string
+      --grace-time int                  This grace time defines the number of
+                                        seconds allowed for existing transfers
+                                        to get completed before shutting down.
+                                        A graceful shutdown is triggered by an
+                                        interrupt signal.
+
   -h, --help                            help for portable
   -l, --log-file-path string            Leave empty to disable logging
       --log-level string                Set the log level.
@@ -141,16 +141,4 @@ Flags:
                                         HTTPS
       --webdav-port int                 0 means a random unprivileged port,
                                         < 0 disabled (default -1)
-```
-
-In portable mode, SFTPGo can advertise the SFTP/FTP services and, optionally, the credentials via multicast DNS, so there is a standard way to discover the service and to automatically connect to it.
-
-Here is an example of the advertised SFTP service including credentials as seen using `avahi-browse`:
-
-```console
-= enp0s31f6 IPv4 SFTPGo portable 53705                         SFTP File Transfer   local
-   hostname = [p1.local]
-   address = [192.168.1.230]
-   port = [53705]
-   txt = ["password=EWOo6pJe" "user=user" "version=0.9.3-dev-b409523-dirty-2019-10-26T13:43:32Z"]
 ```

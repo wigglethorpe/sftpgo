@@ -55,6 +55,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
                         <th>Email</th>
                         <th>Description</th>
                         <th>Groups for users</th>
+                        <th>Role</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -70,6 +71,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
                         <td>{{.Email}}</td>
                         <td>{{.Description}}</td>
                         <td>{{.GetGroupsAsString}}</td>
+                        <td>{{.Role}}</td>
                     </tr>
                     {{end}}
 
@@ -233,7 +235,7 @@ along with this program.  If not, see <https://www.gnu.org/licenses/>.
                     "visible": false,
                 },
                 {
-                    "targets": [5,7,8],
+                    "targets": [5,7,8,10],
                     "visible": false,
                 },
                 {

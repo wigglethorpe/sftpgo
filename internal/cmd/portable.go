@@ -39,8 +39,6 @@ import (
 var (
 	directoryToServe                   string
 	portableSFTPDPort                  int
-	portableAdvertiseService           bool
-	portableAdvertiseCredentials       bool
 	portableUsername                   string
 	portablePassword                   string
 	portableStartDir                   string
@@ -169,6 +167,7 @@ Please take a look at the usage below to customize the serving parameters`,
 					os.Exit(1)
 				}
 			}
+			service.SetGraceTime(graceTime)
 			service := service.Service{
 				ConfigDir:     filepath.Clean(defaultConfigDir),
 				ConfigFile:    defaultConfigFile,
@@ -257,8 +256,10 @@ Please take a look at the usage below to customize the serving parameters`,
 					},
 				},
 			}
-			if err := service.StartPortableMode(portableSFTPDPort, portableFTPDPort, portableWebDAVPort, portableSSHCommands, portableAdvertiseService,
-				portableAdvertiseCredentials, portableFTPSCert, portableFTPSKey, portableWebDAVCert, portableWebDAVKey); err == nil {
+			err := service.StartPortableMode(portableSFTPDPort, portableFTPDPort, portableWebDAVPort, portableSSHCommands,
+				portableFTPSCert, portableFTPSKey, portableWebDAVCert,
+				portableWebDAVKey)
+			if err == nil {
 				service.Wait()
 				if service.Error == nil {
 					os.Exit(0)
@@ -315,14 +316,6 @@ For example: "/somedir::*.jpg,a*b?.png"`)
 The format is:
 /dir::pattern1,pattern2.
 For example: "/somedir::*.jpg,a*b?.png"`)
-	portableCmd.Flags().BoolVarP(&portableAdvertiseService, "advertise-service", "S", false,
-		`Advertise configured services using
-multicast DNS`)
-	portableCmd.Flags().BoolVarP(&portableAdvertiseCredentials, "advertise-credentials", "C", false,
-		`If the SFTP/FTP service is
-advertised via multicast DNS, this
-flag allows to put username/password
-inside the advertised TXT record`)
 	portableCmd.Flags().StringVarP(&portableFsProvider, "fs-provider", "f", "osfs", `osfs => local filesystem (legacy value: 0)
 s3fs => AWS S3 compatible (legacy: 1)
 gcsfs => Google Cloud Storage (legacy: 2)
@@ -403,6 +396,13 @@ multiple concurrent requests and this
 allows data to be transferred at a
 faster rate, over high latency networks,
 by overlapping round-trip times`)
+	portableCmd.Flags().IntVar(&graceTime, graceTimeFlag, 0,
+		`This grace time defines the number of
+seconds allowed for existing transfers
+to get completed before shutting down.
+A graceful shutdown is triggered by an
+interrupt signal.
+`)
 	rootCmd.AddCommand(portableCmd)
 }
 

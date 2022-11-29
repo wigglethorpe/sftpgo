@@ -182,7 +182,7 @@ func TestMain(m *testing.M) {
 	logFilePath = filepath.Join(configDir, "sftpgo_sftpd_test.log")
 	loginBannerFileName := "login_banner"
 	loginBannerFile := filepath.Join(configDir, loginBannerFileName)
-	logger.InitLogger(logFilePath, 5, 1, 28, false, false, zerolog.DebugLevel)
+	logger.InitLogger(logFilePath, 10, 1, 28, false, false, zerolog.DebugLevel)
 	err := os.WriteFile(loginBannerFile, []byte("simple login banner\n"), os.ModePerm)
 	if err != nil {
 		logger.ErrorToConsole("error creating login banner: %v", err)
@@ -401,6 +401,12 @@ func TestInitialization(t *testing.T) {
 	assert.True(t, sftpdConf.Bindings[0].HasProxy())
 	err = sftpdConf.Initialize(configDir)
 	assert.Error(t, err)
+	sftpdConf.Moduli = []string{"missing moduli file"}
+	err = sftpdConf.Initialize(configDir)
+	if assert.Error(t, err) {
+		assert.Contains(t, err.Error(), "unable to open moduli file")
+	}
+	sftpdConf.Moduli = nil
 	sftpdConf.HostKeys = []string{"missing key"}
 	err = sftpdConf.Initialize(configDir)
 	assert.Error(t, err)
@@ -985,7 +991,7 @@ func TestDefender(t *testing.T) {
 	_, _, err = getSftpClient(user, usePubKey)
 	assert.Error(t, err)
 
-	err = dataprovider.DeleteUser(user.Username, "", "")
+	err = dataprovider.DeleteUser(user.Username, "", "", "")
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
@@ -1144,7 +1150,7 @@ func TestConcurrency(t *testing.T) {
 		for {
 			servedReqs := closedConns.Load()
 			if servedReqs > 0 {
-				stats := common.Connections.GetStats()
+				stats := common.Connections.GetStats("")
 				if len(stats) > maxConns {
 					maxConns = len(stats)
 				}
@@ -1178,7 +1184,7 @@ func TestConcurrency(t *testing.T) {
 	}, 1*time.Second, 50*time.Millisecond)
 
 	assert.Eventually(t, func() bool {
-		return len(common.Connections.GetStats()) == 0
+		return len(common.Connections.GetStats("")) == 0
 	}, 1*time.Second, 50*time.Millisecond)
 
 	err = os.Remove(testFilePath)
@@ -4284,7 +4290,7 @@ func TestMaxConnections(t *testing.T) {
 		err = conn.Close()
 		assert.NoError(t, err)
 	}
-	err = dataprovider.DeleteUser(user.Username, "", "")
+	err = dataprovider.DeleteUser(user.Username, "", "", "")
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
@@ -4319,7 +4325,7 @@ func TestMaxPerHostConnections(t *testing.T) {
 		err = conn.Close()
 		assert.NoError(t, err)
 	}
-	err = dataprovider.DeleteUser(user.Username, "", "")
+	err = dataprovider.DeleteUser(user.Username, "", "", "")
 	assert.NoError(t, err)
 	err = os.RemoveAll(user.GetHomeDir())
 	assert.NoError(t, err)
@@ -4603,12 +4609,12 @@ func TestQuotaScan(t *testing.T) {
 }
 
 func TestMultipleQuotaScans(t *testing.T) {
-	res := common.QuotaScans.AddUserQuotaScan(defaultUsername)
+	res := common.QuotaScans.AddUserQuotaScan(defaultUsername, "")
 	assert.True(t, res)
-	res = common.QuotaScans.AddUserQuotaScan(defaultUsername)
+	res = common.QuotaScans.AddUserQuotaScan(defaultUsername, "")
 	assert.False(t, res, "add quota must fail if another scan is already active")
 	assert.True(t, common.QuotaScans.RemoveUserQuotaScan(defaultUsername))
-	activeScans := common.QuotaScans.GetUsersQuotaScans()
+	activeScans := common.QuotaScans.GetUsersQuotaScans("")
 	assert.Equal(t, 0, len(activeScans))
 	assert.False(t, common.QuotaScans.RemoveUserQuotaScan(defaultUsername))
 }
@@ -4866,13 +4872,13 @@ func TestBandwidthAndConnections(t *testing.T) {
 		waitForActiveTransfers(t)
 		time.Sleep(100 * time.Millisecond)
 
-		for _, stat := range common.Connections.GetStats() {
-			common.Connections.Close(stat.ConnectionID)
+		for _, stat := range common.Connections.GetStats("") {
+			common.Connections.Close(stat.ConnectionID, "")
 		}
 		err = <-c
 		assert.Error(t, err, "connection closed while uploading: the upload must fail")
 		assert.Eventually(t, func() bool {
-			return len(common.Connections.GetStats()) == 0
+			return len(common.Connections.GetStats("")) == 0
 		}, 10*time.Second, 200*time.Millisecond)
 		err = os.Remove(testFilePath)
 		assert.NoError(t, err)
@@ -5279,9 +5285,7 @@ func TestSFTPLoopVirtualFolders(t *testing.T) {
 		defer client.Close()
 		assert.NoError(t, checkBasicSFTP(client))
 		_, err = client.ReadDir("/vdir")
-		if assert.Error(t, err) {
-			assert.Contains(t, err.Error(), "SFTP loop")
-		}
+		assert.Error(t, err)
 	}
 	// now make user2 a local account with an SFTP virtual folder to user1.
 	// So we have:
@@ -5316,9 +5320,7 @@ func TestSFTPLoopVirtualFolders(t *testing.T) {
 		defer client.Close()
 		assert.NoError(t, checkBasicSFTP(client))
 		_, err = client.ReadDir("/vdir")
-		if assert.Error(t, err) {
-			assert.Contains(t, err.Error(), "SFTP loop")
-		}
+		assert.Error(t, err)
 	}
 
 	_, err = httpdtest.RemoveUser(user1, http.StatusOK)
@@ -7246,7 +7248,7 @@ func TestHashedPasswords(t *testing.T) {
 		user.Password = ""
 		userGetInitial, _, err := httpdtest.UpdateUser(user, http.StatusOK, "")
 		assert.NoError(t, err)
-		user, err = dataprovider.UserExists(user.Username)
+		user, err = dataprovider.UserExists(user.Username, "")
 		assert.NoError(t, err)
 		assert.Equal(t, pwd, user.Password)
 		user.Password = clearPwd
@@ -7263,7 +7265,7 @@ func TestHashedPasswords(t *testing.T) {
 			conn.Close()
 		}
 		// the password must converted to bcrypt and we should still be able to login
-		user, err = dataprovider.UserExists(user.Username)
+		user, err = dataprovider.UserExists(user.Username, "")
 		assert.NoError(t, err)
 		assert.True(t, strings.HasPrefix(user.Password, "$2a$"))
 		// update the user to invalidate the cached password and force a new check
@@ -7890,7 +7892,8 @@ func TestOpenUnhandledChannel(t *testing.T) {
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return nil
 		},
-		Auth: []ssh.AuthMethod{ssh.Password(defaultPassword)},
+		Auth:    []ssh.AuthMethod{ssh.Password(defaultPassword)},
+		Timeout: 5 * time.Second,
 	}
 	conn, err := ssh.Dial("tcp", sftpServerAddr, config)
 	if assert.NoError(t, err) {
@@ -8177,6 +8180,32 @@ func TestUserPerms(t *testing.T) {
 	assert.True(t, user.HasPerm(dataprovider.PermListItems, "/p34/p1/file.dat"))
 	assert.True(t, user.HasPerm(dataprovider.PermChtimes, "/p/3/4/5/6"))
 	assert.True(t, user.HasPerm(dataprovider.PermDownload, "/p/1/test/file.dat"))
+}
+
+func TestWildcardPermissions(t *testing.T) {
+	user := getTestUser(true)
+	user.Permissions = make(map[string][]string)
+	user.Permissions["/"] = []string{dataprovider.PermListItems}
+	user.Permissions["/p*"] = []string{dataprovider.PermDelete}
+	user.Permissions["/p/*"] = []string{dataprovider.PermDownload, dataprovider.PermUpload}
+	user.Permissions["/p/2"] = []string{dataprovider.PermCreateDirs}
+	user.Permissions["/pa"] = []string{dataprovider.PermChmod}
+	user.Permissions["/p/3/4"] = []string{dataprovider.PermChtimes}
+	assert.True(t, user.HasPerm(dataprovider.PermListItems, "/"))
+	assert.True(t, user.HasPerm(dataprovider.PermDelete, "/p1"))
+	assert.True(t, user.HasPerm(dataprovider.PermDelete, "/ppppp"))
+	assert.False(t, user.HasPerm(dataprovider.PermDelete, "/pa"))
+	assert.True(t, user.HasPerm(dataprovider.PermChmod, "/pa"))
+	assert.True(t, user.HasPerm(dataprovider.PermUpload, "/p/1"))
+	assert.True(t, user.HasPerm(dataprovider.PermUpload, "/p/p"))
+	assert.False(t, user.HasPerm(dataprovider.PermUpload, "/p/2"))
+	assert.True(t, user.HasPerm(dataprovider.PermDownload, "/p/3"))
+	assert.True(t, user.HasPerm(dataprovider.PermDownload, "/p/a/a/a"))
+	assert.False(t, user.HasPerm(dataprovider.PermDownload, "/p/3/4"))
+	assert.True(t, user.HasPerm(dataprovider.PermChtimes, "/p/3/4"))
+	assert.True(t, user.HasPerm(dataprovider.PermDelete, "/pb/a/a/a"))
+	assert.False(t, user.HasPerm(dataprovider.PermDelete, "/abc/a/a/a"))
+	assert.True(t, user.HasPerm(dataprovider.PermListItems, "/abc/a/a/a/b"))
 }
 
 func TestFilterFilePatterns(t *testing.T) {
@@ -10079,7 +10108,7 @@ func TestSCPNestedFolders(t *testing.T) {
 
 	// now change the password for the base user, so SFTP folder will not work
 	baseUser.Password = defaultPassword + "_mod"
-	_, _, err = httpdtest.UpdateUser(baseUser, http.StatusOK, "")
+	_, _, err = httpdtest.UpdateUser(baseUser, http.StatusOK, "1")
 	assert.NoError(t, err)
 
 	err = scpUpload(filepath.Join(baseDir, "vdir"), remoteRootPath, true, false)
@@ -10579,7 +10608,7 @@ func TestSCPErrors(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	err = cmd.Process.Kill()
 	assert.NoError(t, err)
-	assert.Eventually(t, func() bool { return len(common.Connections.GetStats()) == 0 }, 2*time.Second, 100*time.Millisecond)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 }, 2*time.Second, 100*time.Millisecond)
 	cmd = getScpUploadCommand(testFilePath, remoteUpPath, false, false)
 	go func() {
 		err := cmd.Run()
@@ -10591,7 +10620,7 @@ func TestSCPErrors(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	err = cmd.Process.Kill()
 	assert.NoError(t, err)
-	assert.Eventually(t, func() bool { return len(common.Connections.GetStats()) == 0 }, 2*time.Second, 100*time.Millisecond)
+	assert.Eventually(t, func() bool { return len(common.Connections.GetStats("")) == 0 }, 2*time.Second, 100*time.Millisecond)
 	err = os.Remove(testFilePath)
 	assert.NoError(t, err)
 	os.Remove(localPath)
@@ -10667,6 +10696,7 @@ func runSSHCommand(command string, user dataprovider.User, usePubKey bool) ([]by
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return nil
 		},
+		Timeout: 5 * time.Second,
 	}
 	if usePubKey {
 		key, err := ssh.ParsePrivateKey([]byte(testPrivateKey))
@@ -10715,6 +10745,7 @@ func getSftpClientWithAddr(user dataprovider.User, usePubKey bool, addr string) 
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return nil
 		},
+		Timeout: 5 * time.Second,
 	}
 	if usePubKey {
 		signer, err := ssh.ParsePrivateKey([]byte(testPrivateKey))
@@ -10760,6 +10791,7 @@ func getKeyboardInteractiveSftpClient(user dataprovider.User, answers []string) 
 				return answers, nil
 			}),
 		},
+		Timeout: 5 * time.Second,
 	}
 	conn, err := ssh.Dial("tcp", sftpServerAddr, config)
 	if err != nil {
@@ -10779,7 +10811,8 @@ func getCustomAuthSftpClient(user dataprovider.User, authMethods []ssh.AuthMetho
 		HostKeyCallback: func(hostname string, remote net.Addr, key ssh.PublicKey) error {
 			return nil
 		},
-		Auth: authMethods,
+		Auth:    authMethods,
+		Timeout: 5 * time.Second,
 	}
 	var err error
 	var conn *ssh.Client
@@ -11075,7 +11108,7 @@ func computeHashForFile(hasher hash.Hash, path string) (string, error) {
 
 func waitForActiveTransfers(t *testing.T) {
 	assert.Eventually(t, func() bool {
-		for _, stat := range common.Connections.GetStats() {
+		for _, stat := range common.Connections.GetStats("") {
 			if len(stat.Transfers) > 0 {
 				return true
 			}

@@ -29,6 +29,7 @@ import (
 	"os"
 	"os/exec"
 	"path"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -101,10 +102,12 @@ type eventRulesContainer struct {
 }
 
 func (r *eventRulesContainer) addAsyncTask() {
+	activeHooks.Add(1)
 	r.concurrencyGuard <- struct{}{}
 }
 
 func (r *eventRulesContainer) removeAsyncTask() {
+	activeHooks.Add(-1)
 	<-r.concurrencyGuard
 }
 
@@ -474,6 +477,21 @@ func (p *EventParams) AddError(err error) {
 	p.errors = append(p.errors, err.Error())
 }
 
+func (p *EventParams) setBackupParams(backupPath string) {
+	if p.sender != "" {
+		return
+	}
+	p.sender = dataprovider.ActionExecutorSystem
+	p.FsPath = backupPath
+	p.ObjectName = filepath.Base(backupPath)
+	p.VirtualPath = "/" + p.ObjectName
+	p.Timestamp = time.Now().UnixNano()
+	info, err := os.Stat(backupPath)
+	if err == nil {
+		p.FileSize = info.Size()
+	}
+}
+
 func (p *EventParams) getStatusString() string {
 	switch p.Status {
 	case 1:
@@ -501,7 +519,19 @@ func (p *EventParams) getUsers() ([]dataprovider.User, error) {
 }
 
 func (p *EventParams) getUserFromSender() (dataprovider.User, error) {
-	user, err := dataprovider.UserExists(p.sender)
+	if p.sender == dataprovider.ActionExecutorSystem {
+		return dataprovider.User{
+			BaseUser: sdk.BaseUser{
+				Status:   1,
+				Username: p.sender,
+				HomeDir:  dataprovider.GetBackupsPath(),
+				Permissions: map[string][]string{
+					"/": {dataprovider.PermAny},
+				},
+			},
+		}, nil
+	}
+	user, err := dataprovider.UserExists(p.sender, "")
 	if err != nil {
 		eventManagerLog(logger.LevelError, "unable to get user %q: %+v", p.sender, err)
 		return user, fmt.Errorf("error getting user %q", p.sender)
@@ -582,6 +612,13 @@ func (p *EventParams) getStringReplacements(addObjectData bool) []string {
 		"{{IP}}", p.IP,
 		"{{Timestamp}}", fmt.Sprintf("%d", p.Timestamp),
 		"{{StatusString}}", p.getStatusString(),
+	}
+	if p.VirtualPath != "" {
+		replacements = append(replacements, "{{VirtualDirPath}}", path.Dir(p.VirtualPath))
+	}
+	if p.VirtualTargetPath != "" {
+		replacements = append(replacements, "{{VirtualTargetDirPath}}", path.Dir(p.VirtualTargetPath))
+		replacements = append(replacements, "{{TargetName}}", path.Base(p.VirtualTargetPath))
 	}
 	if len(p.errors) > 0 {
 		replacements = append(replacements, "{{ErrorString}}", strings.Join(p.errors, ", "))
@@ -1615,7 +1652,7 @@ func executeQuotaResetForUser(user dataprovider.User) error {
 			user.Username, err)
 		return err
 	}
-	if !QuotaScans.AddUserQuotaScan(user.Username) {
+	if !QuotaScans.AddUserQuotaScan(user.Username, user.Role) {
 		eventManagerLog(logger.LevelError, "another quota scan is already in progress for user %q", user.Username)
 		return fmt.Errorf("another quota scan is in progress for user %q", user.Username)
 	}
@@ -1837,7 +1874,7 @@ func executeMetadataCheckForUser(user dataprovider.User) error {
 			user.Username, err)
 		return err
 	}
-	if !ActiveMetadataChecks.Add(user.Username) {
+	if !ActiveMetadataChecks.Add(user.Username, user.Role) {
 		eventManagerLog(logger.LevelError, "another metadata check is already in progress for user %q", user.Username)
 		return fmt.Errorf("another metadata check is in progress for user %q", user.Username)
 	}
@@ -1901,7 +1938,11 @@ func executeRuleAction(action dataprovider.BaseEventAction, params *EventParams,
 	case dataprovider.ActionTypeEmail:
 		err = executeEmailRuleAction(action.Options.EmailConfig, params)
 	case dataprovider.ActionTypeBackup:
-		err = dataprovider.ExecuteBackup()
+		var backupPath string
+		backupPath, err = dataprovider.ExecuteBackup()
+		if err == nil {
+			params.setBackupParams(backupPath)
+		}
 	case dataprovider.ActionTypeUserQuotaReset:
 		err = executeUsersQuotaResetRuleAction(conditions, params)
 	case dataprovider.ActionTypeFolderQuotaReset:

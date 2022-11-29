@@ -141,6 +141,12 @@ type Configuration struct {
 	// HostKeyAlgorithms lists the public key algorithms that the server will accept for host
 	// key authentication.
 	HostKeyAlgorithms []string `json:"host_key_algorithms" mapstructure:"host_key_algorithms"`
+	// Diffie-Hellman moduli files.
+	// Each moduli file can be defined as a path relative to the configuration directory or an absolute one.
+	// If set, "diffie-hellman-group-exchange-sha256" and "diffie-hellman-group-exchange-sha1" KEX algorithms
+	// will be available, `diffie-hellman-group-exchange-sha256` will be enabled by default if you
+	// don't explicitly set KEXs
+	Moduli []string `json:"moduli" mapstructure:"moduli"`
 	// KexAlgorithms specifies the available KEX (Key Exchange) algorithms in
 	// preference order.
 	KexAlgorithms []string `json:"kex_algorithms" mapstructure:"kex_algorithms"`
@@ -237,7 +243,7 @@ func (c *Configuration) getServerConfig() *ssh.ServerConfig {
 		},
 		NextAuthMethodsCallback: func(conn ssh.ConnMetadata) []string {
 			var nextMethods []string
-			user, err := dataprovider.GetUserWithGroupSettings(conn.User())
+			user, err := dataprovider.GetUserWithGroupSettings(conn.User(), "")
 			if err == nil {
 				nextMethods = user.GetNextAuthMethods(conn.PartialSuccessMethods(), c.PasswordAuthentication)
 			}
@@ -291,6 +297,10 @@ func (c *Configuration) Initialize(configDir string) error {
 	}
 
 	if err := c.initializeCertChecker(configDir); err != nil {
+		return err
+	}
+
+	if err := c.loadModuli(configDir); err != nil {
 		return err
 	}
 
@@ -474,8 +484,8 @@ func canAcceptConnection(ip string) bool {
 		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection refused, ip %#v is banned", ip)
 		return false
 	}
-	if !common.Connections.IsNewConnectionAllowed(ip) {
-		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", fmt.Sprintf("connection not allowed from ip %#v", ip))
+	if err := common.Connections.IsNewConnectionAllowed(ip); err != nil {
+		logger.Log(logger.LevelDebug, common.ProtocolSSH, "", "connection not allowed from ip %q: %v", ip, err)
 		return false
 	}
 	_, err := common.LimitRate(common.ProtocolSSH, ip)
@@ -527,13 +537,11 @@ func (c *Configuration) AcceptInboundConnection(conn net.Conn, config *ssh.Serve
 	loginType := sconn.Permissions.Extensions["sftpgo_login_method"]
 	connectionID := hex.EncodeToString(sconn.SessionID())
 
+	defer user.CloseFs() //nolint:errcheck
 	if err = user.CheckFsRoot(connectionID); err != nil {
-		errClose := user.CloseFs()
-		logger.Warn(logSender, connectionID, "unable to check fs root: %v close fs error: %v", err, errClose)
+		logger.Warn(logSender, connectionID, "unable to check fs root: %v", err)
 		return
 	}
-
-	defer user.CloseFs() //nolint:errcheck
 
 	logger.Log(logger.LevelInfo, common.ProtocolSSH, connectionID,
 		"User %#v logged in with %#v, from ip %#v, client version %#v", user.Username, loginType,
@@ -842,6 +850,29 @@ func (c *Configuration) checkHostKeyAutoGeneration(configDir string) error {
 	return nil
 }
 
+func (c *Configuration) loadModuli(configDir string) error {
+	supportedKexAlgos = util.Remove(supportedKexAlgos, "diffie-hellman-group-exchange-sha1")
+	supportedKexAlgos = util.Remove(supportedKexAlgos, "diffie-hellman-group-exchange-sha256")
+	for _, m := range c.Moduli {
+		m = strings.TrimSpace(m)
+		if !util.IsFileInputValid(m) {
+			logger.Warn(logSender, "", "unable to load invalid moduli file %q", m)
+			logger.WarnToConsole("unable to load invalid host moduli file %q", m)
+			continue
+		}
+		if !filepath.IsAbs(m) {
+			m = filepath.Join(configDir, m)
+		}
+		logger.Info(logSender, "", "loading moduli file %q", m)
+		if err := ssh.ParseModuli(m); err != nil {
+			return err
+		}
+		supportedKexAlgos = append(supportedKexAlgos, "diffie-hellman-group-exchange-sha1",
+			"diffie-hellman-group-exchange-sha256")
+	}
+	return nil
+}
+
 // If no host keys are defined we try to use or generate the default ones.
 func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh.ServerConfig) error {
 	if err := c.checkHostKeyAutoGeneration(configDir); err != nil {
@@ -855,14 +886,14 @@ func (c *Configuration) checkAndLoadHostKeys(configDir string, serverConfig *ssh
 	for _, hostKey := range c.HostKeys {
 		hostKey = strings.TrimSpace(hostKey)
 		if !util.IsFileInputValid(hostKey) {
-			logger.Warn(logSender, "", "unable to load invalid host key %#v", hostKey)
-			logger.WarnToConsole("unable to load invalid host key %#v", hostKey)
+			logger.Warn(logSender, "", "unable to load invalid host key %q", hostKey)
+			logger.WarnToConsole("unable to load invalid host key %q", hostKey)
 			continue
 		}
 		if !filepath.IsAbs(hostKey) {
 			hostKey = filepath.Join(configDir, hostKey)
 		}
-		logger.Info(logSender, "", "Loading private host key %#v", hostKey)
+		logger.Info(logSender, "", "Loading private host key %q", hostKey)
 
 		privateBytes, err := os.ReadFile(hostKey)
 		if err != nil {
